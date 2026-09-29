@@ -67,11 +67,8 @@ class _CreateNameScreenState extends State<CreateNameScreen> {
       return;
     }
 
-    // Yaha keyboard lai unfocus (hide) garne code thapeko xu
-    // Jasle garda screen transition ko bela UI jhayapa skip hudaina
     FocusScope.of(context).unfocus();
 
-    // MaterialPageRoute use garda main.dart ko CupertinoPageTransitionsBuilder automatically apply hunxa
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => DobScreen(

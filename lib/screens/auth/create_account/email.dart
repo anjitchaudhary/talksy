@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 
 import 'createpassword.dart';
@@ -46,37 +48,142 @@ class EmailScreen extends StatefulWidget {
 
 class _EmailScreenState extends State<EmailScreen> {
   final TextEditingController _emailController = TextEditingController();
+  final SupabaseClient _supabase = Supabase.instance.client;
 
-  bool _isButtonEnabled = false;
+  Timer? _debounce;
+  bool _isChecking = false;
+  bool _isEmailAvailable = false;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    _emailController.addListener(_validateEmail);
+    _emailController.addListener(_onEmailChanged);
   }
 
-  void _validateEmail() {
+  void _onEmailChanged() {
     final email = _emailController.text.trim();
 
-    final isValid = RegExp(
-      r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+\.[a-zA-Z]+$",
+    // Reset debounce timer on every keystroke to prevent spamming Supabase requests
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+
+    // Check email regex format strictly ending with .com
+    final isValidFormat = RegExp(
+      r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+\.com$",
+      caseSensitive: false,
     ).hasMatch(email);
 
-    if (_isButtonEnabled != isValid) {
+    if (email.isEmpty) {
       setState(() {
-        _isButtonEnabled = isValid;
+        _isChecking = false;
+        _isEmailAvailable = false;
+        _errorMessage = null;
+      });
+      return;
+    }
+
+    if (!isValidFormat) {
+      setState(() {
+        _isChecking = false;
+        _isEmailAvailable = false;
+        _errorMessage = 'Please enter a valid email ending with .com';
+      });
+      return;
+    }
+
+    // Set checking state to true while debouncing
+    setState(() {
+      _isChecking = true;
+      _errorMessage = null;
+      _isEmailAvailable = false;
+    });
+
+    // Wait 500ms after typing stops before querying Supabase
+    _debounce = Timer(const Duration(milliseconds: 500), () {
+      _checkEmailExistenceInSupabase(email);
+    });
+  }
+
+  Future<void> _checkEmailExistenceInSupabase(String email) async {
+    try {
+      bool emailExists = false;
+      bool checkSuccessful = false;
+
+      // 1. Try calling the Supabase RPC function first (Best way)
+      try {
+        final rpcRes = await _supabase.rpc(
+          'check_email_exists',
+          params: {'email_input': email},
+        );
+        if (rpcRes is bool) {
+          emailExists = rpcRes;
+          checkSuccessful = true;
+        }
+      } catch (rpcError) {
+        debugPrint('RPC Error (Did you create the SQL function?): $rpcError');
+
+        // 2. Fallback to 'profiles' table if RPC fails
+        try {
+          final profileRes = await _supabase
+              .from('profiles')
+              .select('id')
+              .eq('email', email)
+              .maybeSingle();
+
+          emailExists = profileRes != null;
+          checkSuccessful = true;
+        } catch (tableError) {
+          debugPrint(
+            'Table Error (RLS blocking or table missing): $tableError',
+          );
+        }
+      }
+
+      if (!mounted) return;
+
+      if (!checkSuccessful) {
+        setState(() {
+          _isChecking = false;
+          _isEmailAvailable = false;
+          _errorMessage = 'Database setup incomplete. Check console logs.';
+        });
+        return;
+      }
+
+      if (emailExists) {
+        setState(() {
+          _isChecking = false;
+          _isEmailAvailable = false;
+          _errorMessage = 'This email is already taken, try another';
+        });
+      } else {
+        setState(() {
+          _isChecking = false;
+          _isEmailAvailable = true;
+          _errorMessage = null;
+        });
+      }
+    } catch (e) {
+      debugPrint('Unexpected connection error: $e');
+      if (!mounted) return;
+      setState(() {
+        _isChecking = false;
+        _isEmailAvailable = false;
+        _errorMessage = 'Could not verify email. Check your connection.';
       });
     }
   }
 
   void _onNextClicked() {
-    if (!_isButtonEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid email address.'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
+    if (!_isEmailAvailable || _isChecking) {
+      if (_errorMessage != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_errorMessage!),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
       return;
     }
 
@@ -97,7 +204,8 @@ class _EmailScreenState extends State<EmailScreen> {
 
   @override
   void dispose() {
-    _emailController.removeListener(_validateEmail);
+    _debounce?.cancel();
+    _emailController.removeListener(_onEmailChanged);
     _emailController.dispose();
     super.dispose();
   }
@@ -105,16 +213,14 @@ class _EmailScreenState extends State<EmailScreen> {
   @override
   Widget build(BuildContext context) {
     final backgroundColor = Theme.of(context).scaffoldBackgroundColor;
-
     final cardColor = Theme.of(context).cardColor;
-
     final textColor = Theme.of(context).textTheme.bodyLarge?.color;
-
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
-
     final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+
+    final bool isButtonEnabled = _isEmailAvailable && !_isChecking;
 
     return Scaffold(
       backgroundColor: backgroundColor,
@@ -154,24 +260,64 @@ class _EmailScreenState extends State<EmailScreen> {
                 decoration: BoxDecoration(
                   color: cardColor,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade300),
+                  border: Border.all(
+                    color: _errorMessage != null
+                        ? Colors.redAccent
+                        : (_isEmailAvailable
+                              ? Colors.green
+                              : Colors.grey.shade300),
+                    width: _errorMessage != null || _isEmailAvailable ? 1.5 : 1,
+                  ),
                 ),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
                     vertical: 6,
                   ),
-                  child: TextField(
-                    controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    style: TextStyle(color: textColor),
-                    decoration: const InputDecoration(
-                      hintText: 'example@gmail.com',
-                      border: InputBorder.none,
-                    ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _emailController,
+                          keyboardType: TextInputType.emailAddress,
+                          style: TextStyle(color: textColor),
+                          decoration: const InputDecoration(
+                            hintText: 'example@gmail.com',
+                            border: InputBorder.none,
+                          ),
+                        ),
+                      ),
+                      if (_isChecking)
+                        const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      else if (_isEmailAvailable)
+                        const Icon(
+                          Icons.check_circle,
+                          color: Colors.green,
+                          size: 20,
+                        ),
+                    ],
                   ),
                 ),
               ),
+
+              if (_errorMessage != null) ...[
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(
+                    _errorMessage!,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
 
               const SizedBox(height: 24),
 
@@ -179,12 +325,12 @@ class _EmailScreenState extends State<EmailScreen> {
                 width: double.infinity,
                 height: 48,
                 child: ElevatedButton(
-                  onPressed: _isButtonEnabled ? _onNextClicked : null,
+                  onPressed: isButtonEnabled ? _onNextClicked : null,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _isButtonEnabled
+                    backgroundColor: isButtonEnabled
                         ? AppTheme.primary
                         : disabledBg,
-                    foregroundColor: _isButtonEnabled
+                    foregroundColor: isButtonEnabled
                         ? Colors.white
                         : disabledFg,
                     disabledBackgroundColor: disabledBg,
@@ -196,10 +342,22 @@ class _EmailScreenState extends State<EmailScreen> {
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  child: const Text(
-                    'Next',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
+                  child: _isChecking
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Next',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                 ),
               ),
 
