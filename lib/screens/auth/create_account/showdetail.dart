@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:talksy/screens/auth/entryscreen.dart';
+import 'package:talksy/screens/auth/login_account/home/home.dart';
 
 class ShowDetailScreen extends StatefulWidget {
   final String firstName;
@@ -81,11 +82,10 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     }
 
     if (apiKey.startsWith('xsmtpsib-')) {
-      return 'BREVO_API_KEY is an SMTP key. Generate an API key (starts with xkeysib-) from Brevo → SMTP & API → API keys & MCP';
+      return 'BREVO_API_KEY is an SMTP key. Generate an API key (starts with xkeysib-) from Brevo';
     }
 
-    final htmlContent =
-        '''
+    final htmlContent = '''
 <!DOCTYPE html>
 <html lang="en">
 <body style="margin:0;padding:48px 16px;background:#f6f7f9;font-family:Arial,sans-serif;color:#171717;text-align:center;">
@@ -230,12 +230,10 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
 
       if (res.user == null) throw Exception('Sign up failed.');
 
-      _showSnack('Account created successfully.');
-
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           CupertinoPageRoute(
-            builder: (_) => const EntryScreen(showSuccessPopup: true),
+            builder: (_) => const HomeScreen(showSuccessPopup: true),
           ),
           (route) => false,
         );

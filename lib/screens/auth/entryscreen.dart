@@ -30,52 +30,14 @@ class AppTheme {
   static const title = CupertinoColors.label;
   static const subtitle = CupertinoColors.secondaryLabel;
 
-  // Silver-style border that works in both light & dark
   static const silverBorder = CupertinoDynamicColor.withBrightness(
-    color: Color(0xFFC0C0C0), // classic silver
-    darkColor: Color(0xFFA8A8AE), // softer silver for dark mode
+    color: Color(0xFFC0C0C0),
+    darkColor: Color(0xFFA8A8AE),
   );
 }
 
-class EntryScreen extends StatefulWidget {
-  final bool showSuccessPopup;
-
-  const EntryScreen({super.key, this.showSuccessPopup = false});
-
-  @override
-  State<EntryScreen> createState() => _EntryScreenState();
-}
-
-class _EntryScreenState extends State<EntryScreen> {
-  @override
-  void initState() {
-    super.initState();
-
-    if (widget.showSuccessPopup) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showSuccessPopup();
-      });
-    }
-  }
-
-  void _showSuccessPopup() {
-    showCupertinoDialog(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: const Text('Account Created!'),
-        content: const Text(
-          'You have successfully created a Talksy account. '
-          'Please log in with that email and password you set.',
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('I understand'),
-          ),
-        ],
-      ),
-    );
-  }
+class EntryScreen extends StatelessWidget {
+  const EntryScreen({super.key});
 
   @override
   Widget build(BuildContext context) {

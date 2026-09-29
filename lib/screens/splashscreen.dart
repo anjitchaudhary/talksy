@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:talksy/main.dart';
 
 import 'auth/entryscreen.dart';
+import 'auth/login_account/home/home.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -28,9 +30,14 @@ class _SplashScreenState extends State<SplashScreen>
 
     _navigationTimer = Timer(const Duration(milliseconds: 1500), () {
       if (!mounted) return;
+      final session = Supabase.instance.client.auth.currentSession;
+      final targetScreen = session != null
+          ? const HomeScreen()
+          : const EntryScreen();
+
       Navigator.pushReplacement(
         context,
-        CupertinoPageRoute(builder: (_) => const EntryScreen()),
+        CupertinoPageRoute(builder: (_) => targetScreen),
       );
     });
   }
