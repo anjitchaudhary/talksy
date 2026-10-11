@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:talksy/main.dart';
 
 import 'auth/entryscreen.dart';
@@ -28,11 +29,28 @@ class _SplashScreenState extends State<SplashScreen>
       duration: const Duration(milliseconds: 900),
     )..repeat();
 
-    _navigationTimer = Timer(const Duration(milliseconds: 1500), () {
+    _checkSessionAndNavigate();
+  }
+
+  Future<void> _checkSessionAndNavigate() async {
+    _navigationTimer = Timer(const Duration(milliseconds: 1500), () async {
       if (!mounted) return;
+      
       final session = Supabase.instance.client.auth.currentSession;
-      final targetScreen = session != null
-          ? const HomeScreen()
+      final prefs = await SharedPreferences.getInstance();
+      bool isVerified = false;
+
+      if (session != null) {
+        isVerified = prefs.getBool('otp_verified_${session.user.id}') ?? false;
+        if (!isVerified) {
+          await Supabase.instance.client.auth.signOut();
+        }
+      }
+
+      if (!mounted) return;
+
+      final targetScreen = (session != null && isVerified)
+          ? const HomeScreen(showSuccessPopup: false)
           : const EntryScreen();
 
       Navigator.pushReplacement(

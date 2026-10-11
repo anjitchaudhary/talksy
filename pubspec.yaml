@@ -4,19 +4,19 @@ publish_to: 'none'
 version: 0.1.0+1
 
 environment:
-  sdk: ^3.13.4
+  sdk: ^3.13.5
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_dotenv: ^6.0.1
   supabase_flutter: ^2.17.2
-  image_picker: ^1.2.3
+  image_picker: ^1.2.4
   http: ^1.6.0
   intl: ^0.20.3
   mailer: ^7.2.0
   foundation: ^0.0.5
-  shared_preferences: ^2.5.5
+  shared_preferences: ^2.5.6
   flutter_secure_storage: ^11.2.0
   path_provider: ^2.1.6
 

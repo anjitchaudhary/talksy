@@ -62,9 +62,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final user = Supabase.instance.client.auth.currentUser;
-    final profileUrl =
-        user?.userMetadata?['profile_image'] as String? ??
-        user?.userMetadata?['avatar_url'] as String?;
+    final profileUrl = user?.userMetadata?['profile_image'] as String? ??
+                       user?.userMetadata?['avatar_url'] as String?;
 
     return Scaffold(
       appBar: PreferredSize(
