@@ -30,7 +30,6 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 
   String? _activeEmail;
   String? _activeUserId;
-  DateTime? _resendAvailableAt;
   DateTime? _expiresAt;
   Timer? _bgTimer;
 
@@ -76,7 +75,11 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     if (savedEmail != null && savedUserId != null && savedExpiry != null) {
       final expiryDate = DateTime.tryParse(savedExpiry);
       if (expiryDate != null && DateTime.now().isBefore(expiryDate)) {
-        await _syncBackendStatus(savedEmail, uid: savedUserId);
+        await _syncBackendStatus(
+          savedEmail,
+          uid: savedUserId,
+          autoOpenBottomSheet: true,
+        );
       } else {
         await _clearPendingSession();
       }
@@ -105,7 +108,6 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
         _activeEmail = null;
         _activeUserId = null;
         _expiresAt = null;
-        _resendAvailableAt = null;
       });
     }
   }
@@ -113,7 +115,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   Future<void> _syncBackendStatus(
     String email, {
     String? uid,
-    bool autoOpenDialog = false,
+    bool autoOpenBottomSheet = false,
   }) async {
     try {
       final res = await Supabase.instance.client.rpc(
@@ -132,14 +134,15 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
           _activeEmail = email;
           if (uid != null) _activeUserId = uid;
           _expiresAt = DateTime.parse(expiryStr).toLocal();
-          _resendAvailableAt = DateTime.parse(res['last_sent_at'])
-              .toLocal()
-              .add(const Duration(minutes: 10));
           _showResumeIcon = true;
         });
 
         _startBackgroundTimer();
-        if (autoOpenDialog) _openOtpDialog();
+        if (autoOpenBottomSheet) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _openOtpBottomSheet();
+          });
+        }
       } else {
         await _clearPendingSession();
       }
@@ -223,7 +226,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
           await _syncBackendStatus(
             email,
             uid: res.user!.id,
-            autoOpenDialog: true,
+            autoOpenBottomSheet: true,
           );
         } else {
           final otp = List<int>.generate(
@@ -240,7 +243,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
             await _syncBackendStatus(
               email,
               uid: res.user!.id,
-              autoOpenDialog: true,
+              autoOpenBottomSheet: true,
             );
           } else {
             _showSnack(error);
@@ -254,28 +257,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _handleResendCode() async {
-    if (_activeEmail == null) return;
-
-    final newOtp = List<int>.generate(
-      6,
-      (_) => Random.secure().nextInt(10),
-    ).join();
-    final error = await _sendEmailOtp(_activeEmail!, newOtp);
-
-    if (error == null) {
-      await Supabase.instance.client.rpc(
-        'store_otp',
-        params: {'p_email': _activeEmail, 'p_otp': newOtp},
-      );
-      await _syncBackendStatus(_activeEmail!);
-      _showSnack('New verification code sent');
-    } else {
-      _showSnack(error);
-    }
-  }
-
-  void _openOtpDialog() {
+  void _openOtpBottomSheet() {
     if (_activeEmail == null || _activeUserId == null || _expiresAt == null) {
       return;
     }
@@ -287,30 +269,34 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 
     setState(() => _showResumeIcon = false);
 
-    showDialog(
+    showModalBottomSheet(
       context: context,
-      barrierDismissible: false,
-      builder: (context) => _OtpDialogWidget(
-        email: _activeEmail!,
-        userId: _activeUserId!,
-        expiresAt: _expiresAt!,
-        resendAvailableAt: _resendAvailableAt,
-        onResend: _handleResendCode,
-        onMinimize: () => Navigator.pop(context),
-        onVerifySuccess: () async {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setBool('otp_verified_$_activeUserId', true);
-          await _clearPendingSession();
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: _OtpBottomSheetWidget(
+          email: _activeEmail!,
+          userId: _activeUserId!,
+          expiresAt: _expiresAt!,
+          onMinimize: () => Navigator.pop(context),
+          onVerifySuccess: () async {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setBool('otp_verified_$_activeUserId', true);
+            await _clearPendingSession();
 
-          if (!mounted) return;
-          // ignore: use_build_context_synchronously
-          Navigator.of(context).pushAndRemoveUntil(
-            CupertinoPageRoute(
-              builder: (_) => const HomeScreen(showSuccessPopup: false),
-            ),
-            (route) => false,
-          );
-        },
+            if (!mounted) return;
+            // ignore: use_build_context_synchronously
+            Navigator.of(context).pushAndRemoveUntil(
+              CupertinoPageRoute(
+                builder: (_) => const HomeScreen(showSuccessPopup: false),
+              ),
+              (route) => false,
+            );
+          },
+        ),
       ),
     ).then((_) {
       if (mounted &&
@@ -331,6 +317,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
     final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
     final canSubmit = _isButtonEnabled && !_isAuthenticating;
+    final primary = AppTheme.primary;
 
     return Scaffold(
       backgroundColor: bg,
@@ -351,99 +338,120 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                 Icons.mark_email_unread_outlined,
                 color: Colors.blueAccent,
               ),
-              onPressed: () {
-                _syncBackendStatus(
-                  _activeEmail!,
-                  uid: _activeUserId,
-                  autoOpenDialog: true,
-                );
-              },
+              onPressed: _openOtpBottomSheet,
             ),
         ],
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 8),
-              const Text(
-                'Welcome back',
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Sign in with your credentials to continue.',
-                style: TextStyle(fontSize: 16, color: Colors.grey),
-              ),
-              const SizedBox(height: 20),
-              TextField(
-                controller: _emailCtrl,
-                keyboardType: TextInputType.emailAddress,
-                decoration: InputDecoration(
-                  labelText: 'Email',
-                  filled: true,
-                  fillColor: Theme.of(context).cardColor,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 12),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Welcome back',
+                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
                   ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _passCtrl,
-                obscureText: _obscurePassword,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  filled: true,
-                  fillColor: Theme.of(context).cardColor,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Sign in with your credentials to continue.',
+                    style: TextStyle(fontSize: 16, color: Colors.grey),
                   ),
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _obscurePassword
-                          ? Icons.visibility_off
-                          : Icons.visibility,
-                    ),
-                    onPressed: () =>
-                        setState(() => _obscurePassword = !_obscurePassword),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: ElevatedButton(
-                  onPressed: canSubmit ? _onAuthenticate : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: canSubmit ? AppTheme.primary : disabledBg,
-                    foregroundColor: canSubmit ? Colors.white : disabledFg,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: _emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      labelText: 'Email',
+                      filled: true,
+                      fillColor: Theme.of(context).cardColor,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                   ),
-                  child: _isAuthenticating
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            color: disabledFg,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Text(
-                          'Authenticate',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _passCtrl,
+                    obscureText: _obscurePassword,
+                    decoration: InputDecoration(
+                      labelText: 'Password',
+                      filled: true,
+                      fillColor: Theme.of(context).cardColor,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
                         ),
-                ),
+                        onPressed: () => setState(
+                          () => _obscurePassword = !_obscurePassword,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: _showResumeIcon
+                        ? OutlinedButton.icon(
+                            onPressed: _openOtpBottomSheet,
+                            icon: const Icon(Icons.mark_email_unread_rounded),
+                            label: const Text(
+                              'Resume Verification',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: primary,
+                              side: BorderSide(color: primary, width: 1.5),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          )
+                        : ElevatedButton(
+                            onPressed: canSubmit ? _onAuthenticate : null,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: canSubmit ? primary : disabledBg,
+                              foregroundColor: canSubmit
+                                  ? Colors.white
+                                  : disabledFg,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            child: _isAuthenticating
+                                ? SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      color: disabledFg,
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Text(
+                                    'Authenticate',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                          ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -451,87 +459,60 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   }
 }
 
-class _OtpDialogWidget extends StatefulWidget {
+class _OtpBottomSheetWidget extends StatefulWidget {
   final String email;
   final String userId;
   final DateTime expiresAt;
-  final DateTime? resendAvailableAt;
-  final VoidCallback onResend;
   final VoidCallback onMinimize;
   final VoidCallback onVerifySuccess;
 
-  const _OtpDialogWidget({
+  const _OtpBottomSheetWidget({
     required this.email,
     required this.userId,
     required this.expiresAt,
-    this.resendAvailableAt,
-    required this.onResend,
     required this.onMinimize,
     required this.onVerifySuccess,
   });
 
   @override
-  State<_OtpDialogWidget> createState() => _OtpDialogWidgetState();
+  State<_OtpBottomSheetWidget> createState() => _OtpBottomSheetWidgetState();
 }
 
-class _OtpDialogWidgetState extends State<_OtpDialogWidget>
-    with WidgetsBindingObserver {
+class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
   final TextEditingController _otpCtrl = TextEditingController();
-
   bool _isVerifying = false;
-  Timer? _timer;
-  int _secondsRemaining = 0;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _calculateTimeRemaining();
-    _timer = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => _calculateTimeRemaining(),
-    );
+    _otpCtrl.addListener(_onOtpChanged);
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    _otpCtrl.removeListener(_onOtpChanged);
     _otpCtrl.dispose();
-    _timer?.cancel();
     super.dispose();
   }
 
-  void _calculateTimeRemaining() {
-    final now = DateTime.now();
-    final expDiff = widget.expiresAt.difference(now).inSeconds;
-
-    if (expDiff <= 0) {
-      widget.onMinimize();
-      return;
-    }
-
-    if (widget.resendAvailableAt != null) {
-      final resendDiff = widget.resendAvailableAt!.difference(now).inSeconds;
-      final newSeconds = resendDiff > 0 ? resendDiff : 0;
-      if (_secondsRemaining != newSeconds && mounted) {
-        setState(() => _secondsRemaining = newSeconds);
-      }
+  void _onOtpChanged() {
+    if (_errorMessage != null) {
+      setState(() => _errorMessage = null);
     }
   }
 
   Future<void> _verifyOtp() async {
     final token = _otpCtrl.text.trim();
     if (token.length != 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enter a valid 6-digit code.'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
+      setState(() => _errorMessage = 'Please enter a valid 6-digit code.');
       return;
     }
 
-    setState(() => _isVerifying = true);
+    setState(() {
+      _isVerifying = true;
+      _errorMessage = null;
+    });
 
     try {
       final isValid = await Supabase.instance.client.rpc(
@@ -543,23 +524,17 @@ class _OtpDialogWidgetState extends State<_OtpDialogWidget>
         widget.onVerifySuccess();
       } else {
         if (!mounted) return;
-        setState(() => _isVerifying = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Invalid verification code'),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
+        setState(() {
+          _isVerifying = false;
+          _errorMessage = 'Incorrect or invalid verification code.';
+        });
       }
     } catch (_) {
       if (!mounted) return;
-      setState(() => _isVerifying = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Verification failed'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
+      setState(() {
+        _isVerifying = false;
+        _errorMessage = 'Verification failed. Please try again.';
+      });
     }
   }
 
@@ -567,139 +542,199 @@ class _OtpDialogWidgetState extends State<_OtpDialogWidget>
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final primary = AppTheme.primary;
-    final canResend = _secondsRemaining == 0;
 
-    return Dialog(
-      backgroundColor: Theme.of(context).cardColor,
-      elevation: 8,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: primary.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 12,
+            offset: const Offset(0, -3),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(18, 6, 18, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 28,
+                height: 3.5,
+                decoration: BoxDecoration(
+                  color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-              child: Icon(Icons.lock_outline_rounded, color: primary, size: 28),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Security Verification',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Please enter the 6-digit code sent to\n${widget.email}',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 14,
-                color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
-                height: 1.4,
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      color: primary.withValues(alpha: 0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.lock_outline_rounded,
+                      color: primary,
+                      size: 16,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Security Verification',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(height: 24),
-            TextField(
-              controller: _otpCtrl,
-              keyboardType: TextInputType.number,
-              textAlign: TextAlign.center,
-              maxLength: 6,
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 10,
-                color: isDark ? Colors.white : Colors.black87,
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Enter 6-digit code which has been sent to email: ${widget.email}',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                  ),
+                ),
               ),
-              decoration: InputDecoration(
-                hintText: '••••••',
-                hintStyle: TextStyle(
+              const SizedBox(height: 18),
+              TextField(
+                controller: _otpCtrl,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                maxLength: 6,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
                   letterSpacing: 10,
-                  color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                  color: isDark ? Colors.white : Colors.black87,
                 ),
-                counterText: '',
-                filled: true,
-                fillColor: isDark ? Colors.grey.shade900 : Colors.grey.shade100,
-                contentPadding: const EdgeInsets.symmetric(vertical: 16),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: primary, width: 1.5),
+                decoration: InputDecoration(
+                  hintText: '••••••',
+                  hintStyle: TextStyle(
+                    letterSpacing: 10,
+                    color: isDark ? Colors.grey.shade600 : Colors.grey.shade400,
+                  ),
+                  counterText: '',
+                  filled: true,
+                  fillColor: isDark
+                      ? Colors.grey.shade900
+                      : Colors.grey.shade50,
+                  contentPadding: const EdgeInsets.symmetric(
+                    vertical: 12,
+                    horizontal: 10,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(
+                      color: isDark
+                          ? Colors.grey.shade700
+                          : Colors.grey.shade300,
+                      width: 1,
+                    ),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: primary, width: 1.2),
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(
+                      color: isDark
+                          ? Colors.grey.shade700
+                          : Colors.grey.shade300,
+                      width: 1,
+                    ),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                TextButton(
-                  onPressed: _isVerifying || !canResend
-                      ? null
-                      : widget.onResend,
-                  style: TextButton.styleFrom(padding: EdgeInsets.zero),
-                  child: Text(
-                    canResend
-                        ? 'Resend Code'
-                        : 'Resend in ${_secondsRemaining}s',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: canResend ? primary : Colors.grey,
+              if (_errorMessage != null) ...[
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.error_outline,
+                      color: Colors.redAccent,
+                      size: 15,
                     ),
-                  ),
-                ),
-                TextButton(
-                  onPressed: _isVerifying ? null : widget.onMinimize,
-                  style: TextButton.styleFrom(padding: EdgeInsets.zero),
-                  child: const Text(
-                    'Minimize',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              height: 46,
-              child: ElevatedButton(
-                onPressed: _isVerifying ? null : _verifyOtp,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: primary,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: _isVerifying
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Text(
-                        'Verify & Proceed',
-                        style: TextStyle(
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _errorMessage!,
+                        style: const TextStyle(
+                          color: Colors.redAccent,
                           fontSize: 15,
-                          fontWeight: FontWeight.bold,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
+                    ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 18),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: _isVerifying ? null : widget.onMinimize,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 0,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: const Text(
+                      'Minimize',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
+              const SizedBox(height: 15),
+              SizedBox(
+                width: double.infinity,
+                height: 45,
+                child: ElevatedButton(
+                  onPressed: _isVerifying ? null : _verifyOtp,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: primary,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                  ),
+                  child: _isVerifying
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text(
+                          'Verify & Proceed',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
