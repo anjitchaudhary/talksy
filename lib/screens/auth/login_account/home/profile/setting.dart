@@ -1,5 +1,7 @@
+import '../../login.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SettingScreen extends StatelessWidget {
   const SettingScreen({super.key});
@@ -222,7 +224,37 @@ class SettingScreen extends StatelessWidget {
                   title: 'Account logout',
                   textColor: Colors.redAccent,
                   iconColor: Colors.redAccent,
-                  onTap: () {},
+                  onTap: () {
+                    showCupertinoDialog(
+                      context: context,
+                      builder: (dialogContext) => CupertinoAlertDialog(
+                        title: const Text('Log out'),
+                        content: const Text('Are you sure to log out this account?'),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            onPressed: () => Navigator.pop(dialogContext),
+                            child: const Text('Cancel'),
+                          ),
+                          CupertinoDialogAction(
+                            isDestructiveAction: true,
+                            onPressed: () async {
+                              Navigator.pop(dialogContext);
+                              await Supabase.instance.client.auth.signOut();
+                              if (!context.mounted) return;
+                              Navigator.of(context).pushAndRemoveUntil(
+                                CupertinoPageRoute(
+                                  builder: (_) => const LoginScreen(),
+                                ),
+                                (route) => false,
+                              );
+                            },
+                            child: const Text('Yes'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
               const SizedBox(height: 32),
