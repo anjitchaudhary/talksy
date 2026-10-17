@@ -495,47 +495,60 @@ class _ChatScreenState extends State<ChatScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          const Icon(Icons.add, size: 24, color: _grey),
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Icon(Icons.add, size: 24, color: _grey),
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
               decoration: BoxDecoration(
                 color: field,
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: TextField(
-                controller: _input,
-                maxLines: null,
-                keyboardType: TextInputType.multiline,
-                style: TextStyle(fontSize: 15, color: txt),
-                decoration: const InputDecoration(
-                  hintText: 'Message...',
-                  hintStyle: TextStyle(fontSize: 14, color: _grey),
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 10),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 80),
+                child: SingleChildScrollView(
+                  reverse: true,
+                  child: TextField(
+                    controller: _input,
+                    maxLines: null,
+                    keyboardType: TextInputType.multiline,
+                    style: TextStyle(fontSize: 15, color: txt),
+                    decoration: const InputDecoration(
+                      hintText: 'Message...',
+                      hintStyle: TextStyle(fontSize: 14, color: _grey),
+                      border: InputBorder.none,
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
           const SizedBox(width: 8),
-          CupertinoButton(
-            padding: EdgeInsets.zero,
-            minimumSize: const Size(36, 36),
-            onPressed: _send,
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: const BoxDecoration(
-                color: CupertinoColors.activeBlue,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.send_rounded,
-                size: 18,
-                color: Colors.white,
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: CupertinoButton(
+              padding: EdgeInsets.zero,
+              minimumSize: const Size(36, 36),
+              onPressed: _send,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: const BoxDecoration(
+                  color: CupertinoColors.activeBlue,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.send_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
               ),
             ),
           ),
