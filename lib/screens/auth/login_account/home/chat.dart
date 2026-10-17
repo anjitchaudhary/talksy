@@ -3,11 +3,61 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../main.dart';
+
+const _months = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+const _grey = Color(0xFF8E8E93);
+const _subStyle = TextStyle(fontSize: 10, height: 1.1, color: _grey);
+const _noNetMsg = 'Your connection is either slow or no connection!';
+
+String _fmtDate(String? iso) {
+  if (iso == null || iso.isEmpty) return '';
+  final dt = DateTime.tryParse(iso)?.toLocal();
+  if (dt == null) return '';
+  return '${dt.day} ${_months[dt.month - 1]} ${dt.year}';
+}
+
+String _fmtSeen(DateTime dt) {
+  final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final m = dt.minute.toString().padLeft(2, '0');
+  final ampm = dt.hour >= 12 ? 'PM' : 'AM';
+  final yr = dt.year == DateTime.now().year ? '' : ' ${dt.year}';
+  return '${dt.day} ${_months[dt.month - 1]}$yr, $h:$m $ampm';
+}
+
+DateTime? _parseTime(dynamic raw) {
+  if (raw is! String || raw.isEmpty) return null;
+  return DateTime.tryParse(raw)?.toLocal();
+}
+
+String _encode(String text) => base64Encode(utf8.encode(text));
+
+String _decode(String text) {
+  try {
+    return utf8.decode(base64Decode(text));
+  } catch (_) {
+    return text;
+  }
+}
 
 class ChatScreen extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -19,290 +69,450 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const List<String> _months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
+  final _input = TextEditingController();
+  final _scroll = ScrollController();
+  final _db = Supabase.instance.client;
+  final _presence = PresenceService.instance;
+  final _lastSeen = ValueNotifier<DateTime?>(null);
+  final _notice = ValueNotifier<bool>(false);
+  final _pending = <String>{};
 
-  static const TextStyle _subStyle = TextStyle(
-    fontSize: 10,
-    height: 1.1,
-    color: Color(0xFF8E8E93),
-  );
+  List<Map<String, dynamic>> _msgs = [];
+  bool _loading = true;
+  Timer? _noticeTimer;
+  StreamSubscription? _msgSub;
+  StreamSubscription? _profileSub;
 
-  final TextEditingController _messageController = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  final SupabaseClient _supabase = Supabase.instance.client;
-  final PresenceService _presence = PresenceService.instance;
-
-  List<Map<String, dynamic>> _messages = [];
-  bool _isLoading = true;
-  DateTime? _lastSeen;
-  StreamSubscription? _messageSubscription;
-  StreamSubscription? _profileSubscription;
-
-  String get _currentUserId => _supabase.auth.currentUser?.id ?? '';
-  String get _targetUserId => widget.user['id'] ?? '';
+  String get _me => _db.auth.currentUser?.id ?? '';
+  String get _other => (widget.user['id'] ?? '').toString();
 
   @override
   void initState() {
     super.initState();
-    _lastSeen = _parseTime(widget.user['last_seen']);
-    _initChat();
+    _lastSeen.value = _parseTime(widget.user['last_seen']);
+    _presence.connected.addListener(_onNetChange);
+    _init();
   }
 
   @override
   void dispose() {
-    _messageSubscription?.cancel();
-    _profileSubscription?.cancel();
-    _messageController.dispose();
-    _scrollController.dispose();
+    _presence.connected.removeListener(_onNetChange);
+    _noticeTimer?.cancel();
+    _msgSub?.cancel();
+    _profileSub?.cancel();
+    _lastSeen.dispose();
+    _notice.dispose();
+    _input.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
-  Future<void> _initChat() async {
-    await _loadLocalMessages();
+  Future<void> _init() async {
+    await _loadLocal();
     _listenMessages();
     _listenProfile();
-    await _fetchRemoteMessages();
+    await _fetchRemote();
   }
 
-  Future<File> _getLocalFile() async {
+  void _onNetChange() {
+    if (!_presence.connected.value) return;
+    _listenMessages();
+    _listenProfile();
+    _fetchRemote();
+  }
+
+  Future<File> _localFile() async {
     final dir = await getApplicationDocumentsDirectory();
-    final filename = 'chat_${_currentUserId}_$_targetUserId.json';
-    return File('${dir.path}/$filename');
+    return File('${dir.path}/chat_${_me}_$_other.json');
   }
 
-  Future<void> _loadLocalMessages() async {
+  Future<void> _loadLocal() async {
     try {
-      final file = await _getLocalFile();
-      if (await file.exists()) {
-        final content = await file.readAsString();
-        final List<dynamic> jsonList = jsonDecode(content);
-        if (mounted) {
-          setState(() {
-            _messages = List<Map<String, dynamic>>.from(jsonList);
-            _isLoading = false;
-          });
-          _scrollToBottom();
-        }
-      }
+      final file = await _localFile();
+      if (!await file.exists()) return;
+      final list = jsonDecode(await file.readAsString()) as List;
+      if (!mounted) return;
+      setState(() {
+        _msgs = List<Map<String, dynamic>>.from(list);
+        _loading = false;
+      });
     } catch (_) {}
   }
 
-  Future<void> _saveLocalMessages() async {
+  Future<void> _saveLocal() async {
     try {
-      final file = await _getLocalFile();
-      await file.writeAsString(jsonEncode(_messages));
+      final file = await _localFile();
+      final saved = _msgs.where((m) => !_pending.contains(m['id'])).toList();
+      await file.writeAsString(jsonEncode(saved));
     } catch (_) {}
   }
 
   void _listenMessages() {
-    _messageSubscription = _supabase
+    _msgSub?.cancel();
+    _msgSub = _db
         .from('messages')
         .stream(primaryKey: ['id'])
         .order('created_at', ascending: true)
-        .listen((data) {
-          _processIncomingMessages(data);
-        });
+        .listen(_onMessages, onError: (_) => _streamFailed());
+  }
+
+  void _streamFailed() {
+    if (mounted && _loading) setState(() => _loading = false);
   }
 
   void _listenProfile() {
-    if (_targetUserId.isEmpty) return;
-
-    _profileSubscription = _supabase
+    if (_other.isEmpty) return;
+    _profileSub?.cancel();
+    _profileSub = _db
         .from('profiles')
         .stream(primaryKey: ['id'])
-        .eq('id', _targetUserId)
+        .eq('id', _other)
         .listen((rows) {
-          if (rows.isEmpty || !mounted) return;
-          setState(() => _lastSeen = _parseTime(rows.first['last_seen']));
-        });
+          if (rows.isEmpty) return;
+          _lastSeen.value = _parseTime(rows.first['last_seen']);
+        }, onError: (_) {});
   }
 
-  DateTime? _parseTime(dynamic raw) {
-    if (raw is! String || raw.isEmpty) return null;
-    return DateTime.tryParse(raw)?.toLocal();
+  Future<void> _fetchRemote() async {
+    try {
+      final res = await _db
+          .from('messages')
+          .select()
+          .or(
+            'and(sender_id.eq.$_me,receiver_id.eq.$_other),'
+            'and(sender_id.eq.$_other,receiver_id.eq.$_me)',
+          )
+          .order('created_at', ascending: true);
+      _onMessages(List<Map<String, dynamic>>.from(res));
+    } catch (_) {
+      if (mounted && _loading) setState(() => _loading = false);
+    }
   }
 
   Future<void> _markSeen() async {
     try {
-      await _supabase.rpc('mark_seen', params: {'p_sender': _targetUserId});
+      await _db.rpc('mark_seen', params: {'p_sender': _other});
     } catch (_) {}
   }
 
-  Future<void> _processIncomingMessages(List<Map<String, dynamic>> data) async {
-    final filtered = data.where((msg) {
-      final s = msg['sender_id'];
-      final r = msg['receiver_id'];
-      return (s == _currentUserId && r == _targetUserId) ||
-          (s == _targetUserId && r == _currentUserId);
+  void _onMessages(List<Map<String, dynamic>> data) {
+    final rows = data.where((m) {
+      final s = m['sender_id'];
+      final r = m['receiver_id'];
+      return (s == _me && r == _other) || (s == _other && r == _me);
     }).toList();
 
-    final hasUnseen = filtered.any(
-      (msg) => msg['receiver_id'] == _currentUserId && msg['status'] != 'seen',
+    if (rows.any((m) => m['receiver_id'] == _me && m['status'] != 'seen')) {
+      _markSeen();
+    }
+    if (!mounted) return;
+
+    final queued = _msgs.where((m) => _pending.contains(m['id'])).toList();
+    final known = _msgs.map((m) => m['id']).toSet();
+    for (final row in rows) {
+      if (known.contains(row['id']) || row['sender_id'] != _me) continue;
+      final i = queued.indexWhere((q) => q['message'] == row['message']);
+      if (i == -1) continue;
+      _pending.remove(queued[i]['id']);
+      queued.removeAt(i);
+    }
+
+    setState(() {
+      _msgs = [...rows, ...queued];
+      _loading = false;
+    });
+    _saveLocal();
+  }
+
+  void _toBottom() {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      0,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
     );
-    if (hasUnseen) _markSeen();
-
-    if (mounted) {
-      setState(() {
-        _messages = filtered;
-        _isLoading = false;
-      });
-      _saveLocalMessages();
-      _scrollToBottom();
-    }
   }
 
-  Future<void> _fetchRemoteMessages() async {
-    try {
-      final response = await _supabase
-          .from('messages')
-          .select()
-          .or(
-            'and(sender_id.eq.$_currentUserId,receiver_id.eq.$_targetUserId),and(sender_id.eq.$_targetUserId,receiver_id.eq.$_currentUserId)',
-          )
-          .order('created_at', ascending: true);
-
-      final List<Map<String, dynamic>> fetched =
-          List<Map<String, dynamic>>.from(response);
-      _processIncomingMessages(fetched);
-    } catch (_) {
-      if (mounted && _messages.isNotEmpty) {
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
+  void _flashNotice() {
+    _noticeTimer?.cancel();
+    _notice.value = true;
+    _noticeTimer = Timer(const Duration(seconds: 2), () {
+      _notice.value = false;
     });
   }
 
-  String _encryptMessage(String text) {
-    try {
-      return base64Encode(utf8.encode(text));
-    } catch (_) {
-      return text;
+  Future<void> _send() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _me.isEmpty || _other.isEmpty) return;
+
+    if (!_presence.connected.value) {
+      _flashNotice();
+      return;
     }
-  }
 
-  String _decryptMessage(String encoded) {
-    try {
-      return utf8.decode(base64Decode(encoded));
-    } catch (_) {
-      return encoded;
-    }
-  }
+    _input.clear();
 
-  String _formatDate(String? isoString) {
-    if (isoString == null || isoString.isEmpty) return '';
-    try {
-      final dt = DateTime.parse(isoString).toLocal();
-      return '${dt.day} ${_months[dt.month - 1]} ${dt.year}';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  String _formatSeen(DateTime dt) {
-    final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final min = dt.minute.toString().padLeft(2, '0');
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
-    final year = dt.year == DateTime.now().year ? '' : ' ${dt.year}';
-    return '${dt.day} ${_months[dt.month - 1]}$year, $hour:$min $period';
-  }
-
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
-    if (text.isEmpty || _currentUserId.isEmpty || _targetUserId.isEmpty) return;
-
-    _messageController.clear();
-
-    final encryptedText = _encryptMessage(text);
-    final initialStatus = _presence.onlineIds.value.contains(_targetUserId)
+    final body = _encode(text);
+    final status = _presence.onlineIds.value.contains(_other)
         ? 'delivered'
         : 'sent';
-    final tempId = DateTime.now().microsecondsSinceEpoch.toString();
+    final tempId = 'tmp_${DateTime.now().microsecondsSinceEpoch}';
 
+    _pending.add(tempId);
     setState(() {
-      _messages.add({
+      _msgs.add({
         'id': tempId,
-        'sender_id': _currentUserId,
-        'receiver_id': _targetUserId,
-        'message': encryptedText,
-        'status': initialStatus,
+        'sender_id': _me,
+        'receiver_id': _other,
+        'message': body,
+        'status': status,
         'created_at': DateTime.now().toIso8601String(),
       });
     });
-    _saveLocalMessages();
-    _scrollToBottom();
+    _toBottom();
 
     try {
-      final row = await _supabase
+      final row = await _db
           .from('messages')
           .insert({
-            'sender_id': _currentUserId,
-            'receiver_id': _targetUserId,
-            'message': encryptedText,
-            'status': initialStatus,
+            'sender_id': _me,
+            'receiver_id': _other,
+            'message': body,
+            'status': status,
           })
           .select()
           .single();
 
+      _pending.remove(tempId);
       if (!mounted) return;
       setState(() {
-        _messages.removeWhere((m) => m['id'] == tempId);
-        if (!_messages.any((m) => m['id'] == row['id'])) _messages.add(row);
+        _msgs.removeWhere((m) => m['id'] == tempId);
+        if (!_msgs.any((m) => m['id'] == row['id'])) _msgs.add(row);
       });
-      _saveLocalMessages();
+      _saveLocal();
     } catch (_) {
+      _pending.remove(tempId);
       if (!mounted) return;
-      setState(() => _messages.removeWhere((m) => m['id'] == tempId));
-      _messageController.text = text;
+      setState(() => _msgs.removeWhere((m) => m['id'] == tempId));
+      _input.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: text.length),
+      );
+      _flashNotice();
     }
   }
 
-  String _resolveUrl(String rawUrl) {
-    final trimmed = rawUrl.trim();
-    if (trimmed.isEmpty) return '';
-    if (trimmed.startsWith('/') || trimmed.contains('data/user')) return '';
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      return trimmed;
+  String _avatarUrl() {
+    final raw = widget.user['avatar_url'];
+    if (raw is! String) return '';
+    final url = raw.trim();
+    if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
+      return '';
     }
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
     try {
-      return _supabase.storage.from('avatars').getPublicUrl(trimmed);
+      return _db.storage.from('avatars').getPublicUrl(url);
     } catch (_) {
-      return trimmed;
+      return url;
     }
   }
 
-  Widget _buildStatus() {
+  String _title() {
+    final u = widget.user;
+    final full = '${u['first_name'] ?? ''} ${u['last_name'] ?? ''}'.trim();
+    if (full.isNotEmpty) return full;
+    final disp = (u['display_name'] ?? '').toString();
+    if (disp.isNotEmpty) return disp;
+    final mail = (u['email'] ?? '').toString();
+    return mail.isNotEmpty ? mail.split('@').first : 'User';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final bg = dark ? const Color(0xFF121212) : Colors.white;
+    final line = dark ? const Color(0xFF2C2C2C) : const Color(0xFFE5E5E5);
+    final txt = dark ? Colors.white : Colors.black87;
+    final field = dark ? const Color(0xFF1E1E1E) : const Color(0xFFF0F0F0);
+
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        backgroundColor: bg,
+        surfaceTintColor: Colors.transparent,
+        shadowColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        automaticallyImplyLeading: false,
+        titleSpacing: 0,
+        toolbarHeight: 44,
+        title: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            children: [
+              CupertinoButton(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(32, 32),
+                onPressed: () => Navigator.pop(context),
+                child: Icon(Icons.arrow_back_ios_new, size: 20, color: txt),
+              ),
+              const SizedBox(width: 8),
+              _ChatUserAvatar(url: _avatarUrl(), isDark: dark),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _title(),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 16,
+                        height: 1.15,
+                        fontWeight: FontWeight.w600,
+                        color: txt,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    _PresenceLine(uid: _other, lastSeen: _lastSeen),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            Divider(height: 0.5, thickness: 0.5, color: line),
+            Expanded(
+              child: Stack(
+                children: [
+                  _buildList(dark),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 10,
+                    child: _Notice(show: _notice),
+                  ),
+                ],
+              ),
+            ),
+            Divider(height: 0.5, thickness: 0.5, color: line),
+            _buildInput(txt, field),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildList(bool dark) {
+    if (_loading) return const ChatSkeletonLoader();
+
+    if (_msgs.isEmpty) {
+      return const Center(
+        child: Text(
+          'No messages yet',
+          style: TextStyle(fontSize: 14, color: _grey),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      controller: _scroll,
+      reverse: true,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      itemCount: _msgs.length,
+      itemBuilder: (context, i) {
+        final m = _msgs[_msgs.length - 1 - i];
+        return MessageBubble(
+          key: ValueKey(m['id']),
+          message: _decode(m['message'] ?? ''),
+          date: _fmtDate(m['created_at']),
+          isMe: m['sender_id'] == _me,
+          isDark: dark,
+          status: m['status'] ?? 'sent',
+        );
+      },
+    );
+  }
+
+  Widget _buildInput(Color txt, Color field) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          const Icon(Icons.add, size: 24, color: _grey),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: field,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: TextField(
+                controller: _input,
+                maxLines: null,
+                keyboardType: TextInputType.multiline,
+                style: TextStyle(fontSize: 15, color: txt),
+                decoration: const InputDecoration(
+                  hintText: 'Message...',
+                  hintStyle: TextStyle(fontSize: 14, color: _grey),
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(vertical: 10),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(36, 36),
+            onPressed: _send,
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: const BoxDecoration(
+                color: CupertinoColors.activeBlue,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.send_rounded,
+                size: 18,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PresenceLine extends StatelessWidget {
+  final String uid;
+  final ValueListenable<DateTime?> lastSeen;
+
+  const _PresenceLine({required this.uid, required this.lastSeen});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = PresenceService.instance;
+
     return ListenableBuilder(
-      listenable: Listenable.merge([_presence.connected, _presence.onlineIds]),
+      listenable: Listenable.merge([p.connected, p.onlineIds, lastSeen]),
       builder: (context, _) {
-        if (!_presence.connected.value) {
+        if (!p.connected.value) {
           return const Text('No connection!', style: _subStyle);
         }
 
-        if (_presence.onlineIds.value.contains(_targetUserId)) {
+        if (p.onlineIds.value.contains(uid)) {
           return Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -320,214 +530,45 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         }
 
-        final seen = _lastSeen;
+        final seen = lastSeen.value;
         return Text(
-          seen == null ? 'offline' : 'Last seen at ${_formatSeen(seen)}',
+          seen == null ? 'offline' : 'Last seen at ${_fmtSeen(seen)}',
           style: _subStyle,
         );
       },
     );
   }
+}
+
+class _Notice extends StatelessWidget {
+  final ValueListenable<bool> show;
+
+  const _Notice({required this.show});
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    final firstName = widget.user['first_name'] ?? '';
-    final lastName = widget.user['last_name'] ?? '';
-    final displayName = widget.user['display_name'] ?? '';
-    final email = widget.user['email'] ?? '';
-
-    String fullName = '$firstName $lastName'.trim();
-    if (fullName.isEmpty) {
-      fullName = displayName.isNotEmpty
-          ? displayName
-          : (email.isNotEmpty ? email.split('@').first : 'User');
-    }
-
-    final rawAvatarUrl = widget.user['avatar_url'] as String?;
-    final profileUrl = rawAvatarUrl != null ? _resolveUrl(rawAvatarUrl) : '';
-
-    final bgColor = isDark ? const Color(0xFF121212) : Colors.white;
-    final dividerColor = isDark
-        ? const Color(0xFF2C2C2C)
-        : const Color(0xFFE5E5E5);
-    final textColor = isDark ? Colors.white : Colors.black87;
-    final inputBgColor = isDark
-        ? const Color(0xFF1E1E1E)
-        : const Color(0xFFF0F0F0);
-
-    return Scaffold(
-      backgroundColor: bgColor,
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(44),
-        child: AppBar(
-          backgroundColor: bgColor,
-          elevation: 0,
-          automaticallyImplyLeading: false,
-          titleSpacing: 0,
-          title: SafeArea(
-            child: Container(
-              height: 44,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    minimumSize: const Size(32, 32),
-                    onPressed: () => Navigator.pop(context),
-                    child: Icon(
-                      Icons.arrow_back_ios_new,
-                      size: 20,
-                      color: textColor,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _ChatUserAvatar(url: profileUrl, isDark: isDark),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          fullName,
-                          style: TextStyle(
-                            fontSize: 16,
-                            height: 1.15,
-                            fontWeight: FontWeight.w600,
-                            color: textColor,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 1),
-                        _buildStatus(),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
+    return ValueListenableBuilder<bool>(
+      valueListenable: show,
+      builder: (context, on, child) {
+        return IgnorePointer(
+          child: AnimatedOpacity(
+            opacity: on ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            child: child,
           ),
-        ),
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Divider(height: 0.5, thickness: 0.5, color: dividerColor),
-            Expanded(
-              child: Container(
-                color: bgColor,
-                child: _isLoading
-                    ? const ChatSkeletonLoader()
-                    : _messages.isEmpty
-                    ? Center(
-                        child: Text(
-                          'No messages yet',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: isDark
-                                ? const Color(0xFF8E8E93)
-                                : const Color(0xFF8E8E93),
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        itemCount: _messages.length,
-                        itemBuilder: (context, index) {
-                          final msg = _messages[index];
-                          final isMe = msg['sender_id'] == _currentUserId;
-                          final decryptedText = _decryptMessage(
-                            msg['message'] ?? '',
-                          );
-                          final dateStr = _formatDate(msg['created_at']);
-                          final status = msg['status'] ?? 'sent';
-
-                          return MessageBubble(
-                            message: decryptedText,
-                            date: dateStr,
-                            isMe: isMe,
-                            isDark: isDark,
-                            status: status,
-                          );
-                        },
-                      ),
-              ),
-            ),
-            Divider(height: 0.5, thickness: 0.5, color: dividerColor),
-            Container(
-              color: bgColor,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.add,
-                    size: 24,
-                    color: isDark
-                        ? const Color(0xFF8E8E93)
-                        : const Color(0xFF8E8E93),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      decoration: BoxDecoration(
-                        color: inputBgColor,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: TextField(
-                        controller: _messageController,
-                        maxLines: null,
-                        keyboardType: TextInputType.multiline,
-                        style: TextStyle(fontSize: 15, color: textColor),
-                        decoration: InputDecoration(
-                          hintText: 'Message...',
-                          hintStyle: TextStyle(
-                            fontSize: 14,
-                            color: isDark
-                                ? const Color(0xFF8E8E93)
-                                : const Color(0xFF8E8E93),
-                          ),
-                          border: InputBorder.none,
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                            vertical: 10,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    minimumSize: const Size(36, 36),
-                    onPressed: _sendMessage,
-                    child: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: const BoxDecoration(
-                        color: CupertinoColors.activeBlue,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Center(
-                        child: Icon(
-                          Icons.send_rounded,
-                          size: 18,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+        );
+      },
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xE62C2C2E),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: const Text(
+            _noNetMsg,
+            style: TextStyle(fontSize: 11, color: Colors.white),
+          ),
         ),
       ),
     );
@@ -550,36 +591,32 @@ class MessageBubble extends StatelessWidget {
     required this.status,
   });
 
-  Widget _buildStatusIcon() {
-    if (!isMe) return const SizedBox.shrink();
-
-    final statusColor = isDark
-        ? const Color(0xFF8E8E93)
-        : const Color(0xFF8E8E93);
-
-    if (status == 'sent') {
-      return Icon(Icons.check, size: 12, color: statusColor);
-    } else if (status == 'delivered') {
-      return Icon(Icons.done_all, size: 12, color: statusColor);
-    } else if (status == 'seen') {
-      return const Icon(
-        Icons.done_all,
-        size: 12,
-        color: CupertinoColors.activeBlue,
-      );
+  Widget _tick() {
+    switch (status) {
+      case 'seen':
+        return const Icon(
+          Icons.done_all,
+          size: 12,
+          color: CupertinoColors.activeBlue,
+        );
+      case 'delivered':
+        return const Icon(Icons.done_all, size: 12, color: _grey);
+      default:
+        return const Icon(Icons.check, size: 12, color: _grey);
     }
-    return Icon(Icons.check, size: 12, color: statusColor);
   }
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
+    final maxW = MediaQuery.of(context).size.width * 0.70;
+    final theirBg = isDark ? const Color(0xFF262626) : const Color(0xFFE4E6EB);
+    final theirTxt = isDark ? Colors.white : Colors.black87;
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
-        constraints: BoxConstraints(maxWidth: screenWidth * 0.70),
+        constraints: BoxConstraints(maxWidth: maxW),
         child: Column(
           crossAxisAlignment: isMe
               ? CrossAxisAlignment.end
@@ -588,20 +625,14 @@ class MessageBubble extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: isMe
-                    ? CupertinoColors.activeBlue
-                    : (isDark
-                          ? const Color(0xFF262626)
-                          : const Color(0xFFE4E6EB)),
+                color: isMe ? CupertinoColors.activeBlue : theirBg,
                 borderRadius: BorderRadius.circular(18),
               ),
               child: Text(
                 message,
                 style: TextStyle(
                   fontSize: 15,
-                  color: isMe
-                      ? Colors.white
-                      : (isDark ? Colors.white : Colors.black87),
+                  color: isMe ? Colors.white : theirTxt,
                 ),
               ),
             ),
@@ -613,15 +644,10 @@ class MessageBubble extends StatelessWidget {
                   if (date.isNotEmpty)
                     Text(
                       date,
-                      style: TextStyle(
-                        fontSize: 8,
-                        color: isDark
-                            ? const Color(0xFF8E8E93)
-                            : const Color(0xFF8E8E93),
-                      ),
+                      style: const TextStyle(fontSize: 8, color: _grey),
                     ),
                   if (isMe && date.isNotEmpty) const SizedBox(width: 4),
-                  if (isMe) _buildStatusIcon(),
+                  if (isMe) _tick(),
                 ],
               ),
             ),
@@ -641,12 +667,12 @@ class ChatSkeletonLoader extends StatefulWidget {
 
 class _ChatSkeletonLoaderState extends State<ChatSkeletonLoader>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
+  late final AnimationController _ctrl;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
+    _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     )..repeat(reverse: true);
@@ -654,35 +680,32 @@ class _ChatSkeletonLoaderState extends State<ChatSkeletonLoader>
 
   @override
   void dispose() {
-    _controller.dispose();
+    _ctrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final baseColor = isDark
-        ? const Color(0xFF222222)
-        : const Color(0xFFE0E0E0);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final base = dark ? const Color(0xFF222222) : const Color(0xFFE0E0E0);
 
     return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
+      animation: _ctrl,
+      builder: (context, _) {
         return ListView.builder(
           padding: const EdgeInsets.all(12),
           itemCount: 6,
-          itemBuilder: (context, index) {
-            final isRight = index % 2 == 0;
+          itemBuilder: (context, i) {
             return Align(
-              alignment: isRight ? Alignment.centerRight : Alignment.centerLeft,
+              alignment: i % 2 == 0
+                  ? Alignment.centerRight
+                  : Alignment.centerLeft,
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 6),
-                width: 140.0 + (index * 15 % 60),
+                width: 140.0 + (i * 15 % 60),
                 height: 36,
                 decoration: BoxDecoration(
-                  color: baseColor.withValues(
-                    alpha: 0.3 + (_controller.value * 0.4),
-                  ),
+                  color: base.withValues(alpha: 0.3 + (_ctrl.value * 0.4)),
                   borderRadius: BorderRadius.circular(16),
                 ),
               ),
@@ -695,132 +718,121 @@ class _ChatSkeletonLoaderState extends State<ChatSkeletonLoader>
 }
 
 class _ChatUserAvatar extends StatefulWidget {
-  final String? url;
+  final String url;
   final bool isDark;
 
-  const _ChatUserAvatar({this.url, required this.isDark});
+  const _ChatUserAvatar({required this.url, required this.isDark});
 
   @override
   State<_ChatUserAvatar> createState() => _ChatUserAvatarState();
 }
 
 class _ChatUserAvatarState extends State<_ChatUserAvatar> {
-  static const Color _silverColor = Color(0xFFC0C0C0);
-  static final Map<String, File> _memoryCache = {};
+  static const _silver = Color(0xFFC0C0C0);
+  static final _cache = <String, File>{};
 
-  File? _cachedFile;
-  bool _isLoading = false;
+  File? _file;
+  bool _busy = false;
 
   @override
   void initState() {
     super.initState();
-    _initAvatar();
+    _load();
   }
 
   @override
-  void didUpdateWidget(covariant _ChatUserAvatar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url) {
-      _initAvatar();
-    }
+  void didUpdateWidget(covariant _ChatUserAvatar old) {
+    super.didUpdateWidget(old);
+    if (old.url != widget.url) _load();
   }
 
-  void _initAvatar() {
-    final url = widget.url?.trim();
-    if (url == null || url.isEmpty) {
-      _cachedFile = null;
-      _isLoading = false;
+  void _load() {
+    final url = widget.url.trim();
+    if (url.isEmpty) {
+      _file = null;
+      _busy = false;
       return;
     }
-
-    if (_memoryCache.containsKey(url)) {
-      _cachedFile = _memoryCache[url];
-      _isLoading = false;
+    if (_cache.containsKey(url)) {
+      _file = _cache[url];
+      _busy = false;
       return;
     }
-
-    _cachedFile = null;
-    _isLoading = true;
-    _fetchAndCache(url);
+    _file = null;
+    _busy = true;
+    _download(url);
   }
 
-  Future<void> _fetchAndCache(String url) async {
+  void _done(String url, File? file) {
+    if (file != null) _cache[url] = file;
+    if (!mounted || widget.url.trim() != url) return;
+    setState(() {
+      _file = file;
+      _busy = false;
+    });
+  }
+
+  Future<void> _download(String url) async {
+    final client = HttpClient();
     try {
       final dir = await getTemporaryDirectory();
-      final key = url.hashCode.abs().toString();
-      final file = File('${dir.path}/avatar_chat_$key.png');
+      final file = File('${dir.path}/avatar_chat_${url.hashCode.abs()}.png');
 
       if (await file.exists()) {
-        _memoryCache[url] = file;
-        if (mounted && widget.url?.trim() == url) {
-          setState(() {
-            _cachedFile = file;
-            _isLoading = false;
-          });
-        }
+        _done(url, file);
         return;
       }
 
-      final request = await HttpClient().getUrl(Uri.parse(url));
-      final response = await request.close();
-
-      if (response.statusCode == 200) {
-        final bytes = await response.fold<List<int>>(
-          <int>[],
-          (buffer, data) => buffer..addAll(data),
-        );
-        await file.writeAsBytes(bytes);
-        _memoryCache[url] = file;
-        if (mounted && widget.url?.trim() == url) {
-          setState(() {
-            _cachedFile = file;
-            _isLoading = false;
-          });
-        }
-      } else {
-        if (mounted) setState(() => _isLoading = false);
+      final req = await client.getUrl(Uri.parse(url));
+      final res = await req.close();
+      if (res.statusCode != 200) {
+        _done(url, null);
+        return;
       }
+
+      final bytes = await res.fold<List<int>>(
+        [],
+        (all, part) => all..addAll(part),
+      );
+      await file.writeAsBytes(bytes);
+      _done(url, file);
     } catch (_) {
-      if (mounted) setState(() => _isLoading = false);
+      _done(url, null);
+    } finally {
+      client.close();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bgBase = widget.isDark
-        ? const Color(0xFF222222)
-        : const Color(0xFFECECEC);
+    final dark = widget.isDark;
 
     return Container(
       width: 34,
       height: 34,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: bgBase,
+        color: dark ? const Color(0xFF222222) : const Color(0xFFECECEC),
         border: Border.all(
-          color: widget.isDark
-              ? _silverColor.withValues(alpha: 0.5)
-              : _silverColor,
+          color: dark ? _silver.withValues(alpha: 0.5) : _silver,
           width: 0.8,
         ),
       ),
-      child: ClipOval(child: _buildAvatarContent()),
+      child: ClipOval(child: _content(dark)),
     );
   }
 
-  Widget _buildAvatarContent() {
-    if (_cachedFile != null) {
-      return Image.file(_cachedFile!, width: 34, height: 34, fit: BoxFit.cover);
+  Widget _content(bool dark) {
+    if (_file != null) {
+      return Image.file(_file!, width: 34, height: 34, fit: BoxFit.cover);
     }
-
-    if (_isLoading) {
+    if (_busy) {
       return const Center(child: CupertinoActivityIndicator(radius: 6));
     }
-
     return Icon(
       Icons.person,
       size: 18,
-      color: widget.isDark ? Colors.white70 : Colors.black54,
+      color: dark ? Colors.white70 : Colors.black54,
     );
   }
 }
