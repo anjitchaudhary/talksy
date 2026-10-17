@@ -95,6 +95,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    precacheImage(const AssetImage('assets/images/light_doodle.png'), context);
+    precacheImage(const AssetImage('assets/images/dark_doodle.png'), context);
+  }
+
+  @override
   void dispose() {
     _presence.connected.removeListener(_onNetChange);
     _noticeTimer?.cancel();
@@ -334,76 +341,89 @@ class _ChatScreenState extends State<ChatScreen> {
     final line = dark ? const Color(0xFF2C2C2C) : const Color(0xFFE5E5E5);
     final txt = dark ? Colors.white : Colors.black87;
     final field = dark ? const Color(0xFF1E1E1E) : const Color(0xFFF0F0F0);
+    final doodle = dark
+        ? 'assets/images/dark_doodle.png'
+        : 'assets/images/light_doodle.png';
 
-    return Scaffold(
-      backgroundColor: bg,
-      appBar: AppBar(
+    return RepaintBoundary(
+      child: Scaffold(
         backgroundColor: bg,
-        surfaceTintColor: Colors.transparent,
-        shadowColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        automaticallyImplyLeading: false,
-        titleSpacing: 0,
-        toolbarHeight: 44,
-        title: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Row(
-            children: [
-              CupertinoButton(
-                padding: EdgeInsets.zero,
-                minimumSize: const Size(32, 32),
-                onPressed: () => Navigator.pop(context),
-                child: Icon(Icons.arrow_back_ios_new, size: 20, color: txt),
-              ),
-              const SizedBox(width: 8),
-              _ChatUserAvatar(url: _avatarUrl(), isDark: dark),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _title(),
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 16,
-                        height: 1.15,
-                        fontWeight: FontWeight.w600,
-                        color: txt,
-                      ),
-                    ),
-                    const SizedBox(height: 1),
-                    _PresenceLine(uid: _other, lastSeen: _lastSeen),
-                  ],
+        appBar: AppBar(
+          backgroundColor: bg,
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          automaticallyImplyLeading: false,
+          titleSpacing: 0,
+          toolbarHeight: 44,
+          title: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              children: [
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(32, 32),
+                  onPressed: () => Navigator.pop(context),
+                  child: Icon(Icons.arrow_back_ios_new, size: 20, color: txt),
                 ),
-              ),
-            ],
+                const SizedBox(width: 8),
+                _ChatUserAvatar(url: _avatarUrl(), isDark: dark),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _title(),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 16,
+                          height: 1.15,
+                          fontWeight: FontWeight.w600,
+                          color: txt,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      _PresenceLine(uid: _other, lastSeen: _lastSeen),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-      ),
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            Divider(height: 0.5, thickness: 0.5, color: line),
-            Expanded(
-              child: Stack(
-                children: [
-                  _buildList(dark),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 10,
-                    child: _Notice(show: _notice),
+        body: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Divider(height: 0.5, thickness: 0.5, color: line),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    image: DecorationImage(
+                      image: AssetImage(doodle),
+                      fit: BoxFit.cover,
+                    ),
                   ),
-                ],
+                  child: Stack(
+                    children: [
+                      _buildList(dark),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 10,
+                        child: _Notice(show: _notice),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
-            Divider(height: 0.5, thickness: 0.5, color: line),
-            _buildInput(txt, field),
-          ],
+              Divider(height: 0.5, thickness: 0.5, color: line),
+              Container(color: bg, child: _buildInput(txt, field)),
+            ],
+          ),
         ),
       ),
     );

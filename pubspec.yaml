@@ -35,4 +35,6 @@ flutter:
   assets:
    - .env
    - assets/icon/icon.png
+   - assets/images/dark_doodle.png
+   - assets/images/light_doodle.png
   uses-material-design: true
