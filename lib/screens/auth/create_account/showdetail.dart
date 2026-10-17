@@ -12,6 +12,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 import 'package:talksy/screens/auth/login_account/home/home.dart';
+import 'package:talksy/screens/auth/login_account/login.dart'
+    show SavedAccountStore;
 
 class ShowDetailScreen extends StatefulWidget {
   final String firstName;
@@ -222,6 +224,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     }
 
     setState(() => _isLoading = true);
+    var otpUsed = false;
 
     try {
       final isValid = await Supabase.instance.client.rpc(
@@ -236,6 +239,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       }
 
       _activeSessionEmail = null;
+      otpUsed = true;
 
       final imageUrl = await _uploadImageToCloudinary();
       final fullName = '${widget.firstName.trim()} ${widget.lastName.trim()}';
@@ -259,6 +263,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('otp_verified_${res.user!.id}', true);
+      await SavedAccountStore.save(user: res.user!, password: widget.password);
 
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
@@ -270,7 +275,13 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       }
     } catch (_) {
       _showSnack('Error occurred during account creation.');
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          if (otpUsed) _isOtpSent = false;
+        });
+        if (otpUsed) _otpController.clear();
+      }
     }
   }
 

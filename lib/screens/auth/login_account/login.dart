@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -131,6 +132,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
         if (uid != null) await prefs.setString('pending_login_uid', uid);
         await prefs.setString('pending_login_expires', expiryStr);
 
+        if (!mounted) return;
         setState(() {
           _activeEmail = email;
           if (uid != null) _activeUserId = uid;
@@ -281,18 +283,24 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<String> _cacheAvatarLocally(String url, String userId) async {
-    if (url.isEmpty) return '';
-    try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final dir = await getApplicationDocumentsDirectory();
-        final file = File('${dir.path}/avatar_$userId.jpg');
-        await file.writeAsBytes(response.bodyBytes);
-        return file.path;
-      }
-    } catch (_) {}
-    return '';
+  Future<void> _onOtpVerified(NavigatorState nav) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('otp_verified_$_activeUserId', true);
+
+    final user = Supabase.instance.client.auth.currentUser;
+    if (_rememberPassword && _passCtrl.text.isNotEmpty && user != null) {
+      await SavedAccountStore.save(user: user, password: _passCtrl.text);
+    }
+
+    await _clearPendingSession();
+    if (!mounted) return;
+
+    nav.pushAndRemoveUntil(
+      CupertinoPageRoute(
+        builder: (_) => const HomeScreen(showSuccessPopup: false),
+      ),
+      (route) => false,
+    );
   }
 
   void _openOtpBottomSheet() {
@@ -304,6 +312,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
       _clearPendingSession();
       return;
     }
+
+    final nav = Navigator.of(context);
 
     showModalBottomSheet(
       context: context,
@@ -317,71 +327,17 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
           email: _activeEmail!,
           userId: _activeUserId!,
           expiresAt: _expiresAt!,
-          rememberPassword: _rememberPassword,
           onMinimize: () => Navigator.pop(context),
-          onVerifySuccess: () async {
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setBool('otp_verified_$_activeUserId', true);
-
-            if (_rememberPassword) {
-              final user = Supabase.instance.client.auth.currentUser;
-              if (user != null) {
-                final metadata = user.userMetadata ?? {};
-                final firstName =
-                    metadata['first_name'] ?? metadata['name'] ?? 'User';
-                final lastName = metadata['last_name'] ?? '';
-                final avatarUrl =
-                    metadata['profile_image'] ?? metadata['avatar_url'] ?? '';
-
-                final localAvatarPath = await _cacheAvatarLocally(
-                  avatarUrl,
-                  user.id,
-                );
-
-                final savedAccountData = {
-                  'id': user.id,
-                  'email': _activeEmail,
-                  'password': _passCtrl.text,
-                  'first_name': firstName,
-                  'last_name': lastName,
-                  'avatar_url': avatarUrl,
-                  'local_avatar_path': localAvatarPath,
-                  'last_login': DateTime.now().toIso8601String(),
-                };
-
-                final existingList =
-                    prefs.getStringList('saved_accounts') ?? [];
-                existingList.removeWhere((item) {
-                  final decoded = jsonDecode(item) as Map<String, dynamic>;
-                  return decoded['id'] == user.id ||
-                      decoded['email'] == _activeEmail;
-                });
-                existingList.add(jsonEncode(savedAccountData));
-                await prefs.setStringList('saved_accounts', existingList);
-              }
-            }
-
-            await _clearPendingSession();
-
-            if (!mounted) return;
-            // ignore: use_build_context_synchronously
-            Navigator.of(context).pushAndRemoveUntil(
-              CupertinoPageRoute(
-                builder: (_) => const HomeScreen(showSuccessPopup: false),
-              ),
-              (route) => false,
-            );
-          },
+          onVerifySuccess: () => _onOtpVerified(nav),
         ),
       ),
     ).then((_) {
-      if (mounted &&
+      final stillValid =
+          mounted &&
           _activeEmail != null &&
           _expiresAt != null &&
-          DateTime.now().isBefore(_expiresAt!)) {
-      } else {
-        _clearPendingSession();
-      }
+          DateTime.now().isBefore(_expiresAt!);
+      if (!stillValid) _clearPendingSession();
     });
   }
 
@@ -662,6 +618,112 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   }
 }
 
+class SavedAccountStore {
+  static const String _key = 'saved_accounts';
+  static const FlutterSecureStorage _vault = FlutterSecureStorage();
+
+  static Future<List<Map<String, dynamic>>> _read() async {
+    try {
+      final raw = await _vault.read(key: _key);
+      if (raw == null || raw.isEmpty) return [];
+      return (jsonDecode(raw) as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> _write(List<Map<String, dynamic>> accounts) {
+    return _vault.write(key: _key, value: jsonEncode(accounts));
+  }
+
+  static Future<void> _moveOldAccounts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final old = prefs.getStringList(_key);
+    if (old == null) return;
+
+    final accounts = await _read();
+    for (final item in old) {
+      final acc = jsonDecode(item) as Map<String, dynamic>;
+      final exists = accounts.any((a) => a['id'] == acc['id']);
+      if (!exists) accounts.add(acc);
+    }
+    await _write(accounts);
+    await prefs.remove(_key);
+  }
+
+  static DateTime _loginTime(Map<String, dynamic> acc) {
+    return DateTime.tryParse(acc['last_login'] ?? '') ?? DateTime(2000);
+  }
+
+  static Future<String> _cacheAvatar(String url, String userId) async {
+    if (url.isEmpty) return '';
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final dir = await getApplicationDocumentsDirectory();
+        final file = File('${dir.path}/avatar_$userId.jpg');
+        await file.writeAsBytes(response.bodyBytes);
+        return file.path;
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  static Future<List<Map<String, dynamic>>> load() async {
+    try {
+      await _moveOldAccounts();
+    } catch (_) {}
+    final accounts = await _read();
+    accounts.sort((a, b) => _loginTime(b).compareTo(_loginTime(a)));
+    return accounts;
+  }
+
+  static Future<void> save({
+    required User user,
+    required String password,
+  }) async {
+    try {
+      final meta = user.userMetadata ?? {};
+      final avatarUrl = (meta['profile_image'] ?? meta['avatar_url'] ?? '')
+          .toString();
+
+      final accounts = await _read();
+      accounts.removeWhere(
+        (a) => a['id'] == user.id || a['email'] == user.email,
+      );
+      accounts.add({
+        'id': user.id,
+        'email': user.email ?? '',
+        'password': password,
+        'first_name': (meta['first_name'] ?? meta['name'] ?? 'User').toString(),
+        'last_name': (meta['last_name'] ?? '').toString(),
+        'avatar_url': avatarUrl,
+        'local_avatar_path': await _cacheAvatar(avatarUrl, user.id),
+        'last_login': DateTime.now().toIso8601String(),
+      });
+      await _write(accounts);
+    } catch (_) {}
+  }
+
+  static Future<void> touch(String id) async {
+    final accounts = await _read();
+    for (final acc in accounts) {
+      if (acc['id'] == id) {
+        acc['last_login'] = DateTime.now().toIso8601String();
+      }
+    }
+    await _write(accounts);
+  }
+
+  static Future<void> remove(String id) async {
+    final accounts = await _read();
+    accounts.removeWhere((a) => a['id'] == id);
+    await _write(accounts);
+  }
+}
+
 class SavedAccountScreen extends StatefulWidget {
   const SavedAccountScreen({super.key});
 
@@ -680,24 +742,12 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
   }
 
   Future<void> _loadSavedAccounts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('saved_accounts') ?? [];
-    final decoded = list
-        .map((item) => jsonDecode(item) as Map<String, dynamic>)
-        .toList();
-
-    decoded.sort((a, b) {
-      final timeA = DateTime.tryParse(a['last_login'] ?? '') ?? DateTime(2000);
-      final timeB = DateTime.tryParse(b['last_login'] ?? '') ?? DateTime(2000);
-      return timeB.compareTo(timeA);
+    final accounts = await SavedAccountStore.load();
+    if (!mounted) return;
+    setState(() {
+      _savedAccounts = accounts;
+      _isLoading = false;
     });
-
-    if (mounted) {
-      setState(() {
-        _savedAccounts = decoded;
-        _isLoading = false;
-      });
-    }
   }
 
   String _getTimeAgo(String? timeStr) {
@@ -713,38 +763,31 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     return '${dt.day}/${dt.month}/${dt.year}';
   }
 
-  Future<void> _deleteAccount(String id) async {
+  void _deleteAccount(String id) {
     showCupertinoDialog(
       context: context,
-      builder: (context) => CupertinoAlertDialog(
+      builder: (dialogContext) => CupertinoAlertDialog(
         title: const Text('Are you sure to remove this saved account'),
         actions: [
           CupertinoDialogAction(
-            isDestructiveAction: false,
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text('Cancel'),
           ),
           CupertinoDialogAction(
             isDestructiveAction: true,
             onPressed: () async {
-              Navigator.pop(context);
-              final prefs = await SharedPreferences.getInstance();
+              Navigator.pop(dialogContext);
+              await SavedAccountStore.remove(id);
+              if (!mounted) return;
               setState(() {
                 _savedAccounts.removeWhere((acc) => acc['id'] == id);
               });
-              final encoded = _savedAccounts
-                  .map((acc) => jsonEncode(acc))
-                  .toList();
-              await prefs.setStringList('saved_accounts', encoded);
-              if (mounted) {
-                // ignore: use_build_context_synchronously
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Account removed successfully.'),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Account removed successfully.'),
+                  backgroundColor: Colors.green,
+                ),
+              );
             },
             child: const Text('Yes'),
           ),
@@ -754,9 +797,7 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
   }
 
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
-    final email = account['email'];
-    final password = account['password'];
-    final accountId = account['id'];
+    final nav = Navigator.of(context);
 
     showCupertinoDialog(
       context: context,
@@ -771,39 +812,33 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
 
     try {
       final res = await Supabase.instance.client.auth.signInWithPassword(
-        email: email,
-        password: password,
+        email: account['email'],
+        password: account['password'],
       );
 
-      if (res.user != null) {
-        final prefs = await SharedPreferences.getInstance();
-        account['last_login'] = DateTime.now().toIso8601String();
-
-        _savedAccounts.removeWhere((acc) => acc['id'] == accountId);
-        _savedAccounts.insert(0, account);
-
-        final encoded = _savedAccounts.map((acc) => jsonEncode(acc)).toList();
-        await prefs.setStringList('saved_accounts', encoded);
-
-        if (!mounted) return;
-        Navigator.pop(context);
-        Navigator.of(context).pushAndRemoveUntil(
-          CupertinoPageRoute(
-            builder: (_) => const HomeScreen(showSuccessPopup: false),
-          ),
-          (route) => false,
-        );
-      } else {
-        if (!mounted) return;
-        Navigator.pop(context);
-        _showError('Failed to login. Please try again.');
+      if (res.user == null) {
+        nav.pop();
+        if (mounted) _showError('Failed to login. Please try again.');
+        return;
       }
-    } catch (_) {
-      if (!mounted) return;
-      Navigator.pop(context);
-      _showError(
-        'Saved credentials expired or invalid. Please login manually.',
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('otp_verified_${res.user!.id}', true);
+      await SavedAccountStore.touch(account['id']);
+
+      nav.pushAndRemoveUntil(
+        CupertinoPageRoute(
+          builder: (_) => const HomeScreen(showSuccessPopup: false),
+        ),
+        (route) => false,
       );
+    } catch (_) {
+      nav.pop();
+      if (mounted) {
+        _showError(
+          'Saved credentials expired or invalid. Please login manually.',
+        );
+      }
     }
   }
 
@@ -995,7 +1030,6 @@ class _OtpBottomSheetWidget extends StatefulWidget {
   final String email;
   final String userId;
   final DateTime expiresAt;
-  final bool rememberPassword;
   final VoidCallback onMinimize;
   final VoidCallback onVerifySuccess;
 
@@ -1003,7 +1037,6 @@ class _OtpBottomSheetWidget extends StatefulWidget {
     required this.email,
     required this.userId,
     required this.expiresAt,
-    required this.rememberPassword,
     required this.onMinimize,
     required this.onVerifySuccess,
   });

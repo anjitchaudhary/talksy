@@ -433,10 +433,40 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_loading) return const ChatSkeletonLoader();
 
     if (_msgs.isEmpty) {
-      return const Center(
-        child: Text(
-          'No messages yet',
-          style: TextStyle(fontSize: 14, color: _grey),
+      final borderColor = dark
+          ? const Color(0xFF2C2C2C)
+          : const Color(0xFFE5E5E5);
+      final containerBg = dark
+          ? const Color(0xFF1E1E1E)
+          : const Color(0xFFF4F4F4);
+
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: containerBg,
+                border: Border.all(color: borderColor, width: 1),
+              ),
+              child: const Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 26,
+                color: _grey,
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'No messages yet.',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: _grey,
+              ),
+            ),
+          ],
         ),
       );
     }

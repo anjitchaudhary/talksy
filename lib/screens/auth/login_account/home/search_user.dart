@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import 'profile/another_user.dart';
 
 class SearchUserScreen extends StatefulWidget {
@@ -32,6 +33,18 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onSearchChanged() {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) {
+      setState(() {
+        _searchResults = [];
+        _isSearching = false;
+      });
+      return;
+    }
+    _performSearch(query);
   }
 
   Future<File> _getHistoryFile() async {
@@ -123,18 +136,6 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
       await _saveSearchHistory();
       if (mounted) setState(() {});
     }
-  }
-
-  void _onSearchChanged() {
-    final query = _searchController.text.trim();
-    if (query.isEmpty) {
-      setState(() {
-        _searchResults = [];
-        _isSearching = false;
-      });
-      return;
-    }
-    _performSearch(query);
   }
 
   Future<void> _performSearch(String query) async {
@@ -274,9 +275,36 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
               ),
             ),
           if (_isSearching)
-            const Padding(
-              padding: EdgeInsets.only(top: 32),
-              child: CupertinoActivityIndicator(),
+            const Expanded(child: Center(child: CupertinoActivityIndicator()))
+          else if (displayList.isEmpty)
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isDark
+                            ? const Color(0xFF1E1E1E)
+                            : const Color(0xFFF4F4F4),
+                        border: Border.all(color: borderColor, width: 1),
+                      ),
+                      child: Icon(Icons.search, size: 26, color: subtitleColor),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'No users searched',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: subtitleColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             )
           else
             Expanded(

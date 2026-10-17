@@ -35,7 +35,7 @@ class _SplashScreenState extends State<SplashScreen>
   Future<void> _checkSessionAndNavigate() async {
     _navigationTimer = Timer(const Duration(milliseconds: 1500), () async {
       if (!mounted) return;
-      
+
       final session = Supabase.instance.client.auth.currentSession;
       final prefs = await SharedPreferences.getInstance();
       bool isVerified = false;
@@ -83,8 +83,8 @@ class _SplashScreenState extends State<SplashScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Image.asset('assets/icon/icon.png', width: size.width * 0.30),
-                  const SizedBox(height: 15),
+                  Image.asset('assets/icon/icon.png', width: size.width * 0.20),
+                  const SizedBox(height: 10),
                   AnimatedBuilder(
                     animation: _dotsController,
                     builder: (context, child) {
@@ -111,8 +111,8 @@ class _SplashScreenState extends State<SplashScreen>
                             child: Opacity(
                               opacity: opacity.clamp(0.25, 1.0),
                               child: Container(
-                                width: 8,
-                                height: 8,
+                                width: 7,
+                                height: 7,
                                 decoration: BoxDecoration(
                                   color: dotColor,
                                   shape: BoxShape.circle,
