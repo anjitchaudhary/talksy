@@ -825,7 +825,7 @@ class _ChatUserAvatarState extends State<_ChatUserAvatar> {
   Future<void> _download(String url) async {
     final client = HttpClient();
     try {
-      final dir = await getTemporaryDirectory();
+      final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/avatar_chat_${url.hashCode.abs()}.png');
 
       if (await file.exists()) {

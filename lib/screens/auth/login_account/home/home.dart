@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'chatpreview.dart';
 import 'profile/profile.dart';
 import 'search_user.dart';
 
@@ -76,10 +77,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       backgroundColor: bgColor,
+      resizeToAvoidBottomInset: false,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(48.5),
         child: AppBar(
           backgroundColor: bgColor,
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
           elevation: 0,
           automaticallyImplyLeading: false,
           titleSpacing: 0,
@@ -139,7 +143,15 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       ),
-      body: const SizedBox.expand(),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: const [
+          ChatPreviewScreen(),
+          SizedBox.expand(),
+          SizedBox.expand(),
+          SizedBox.expand(),
+        ],
+      ),
       bottomNavigationBar: BottomNavTitle(
         isDark: isDark,
         currentIndex: _selectedIndex,
@@ -273,8 +285,9 @@ class _UserAvatarState extends State<_UserAvatar> {
   }
 
   Future<void> _fetchAndCache(String url) async {
+    final client = HttpClient();
     try {
-      final dir = await getTemporaryDirectory();
+      final dir = await getApplicationDocumentsDirectory();
       final key = url.hashCode.abs().toString();
       final file = File('${dir.path}/avatar_$key.png');
 
@@ -289,7 +302,7 @@ class _UserAvatarState extends State<_UserAvatar> {
         return;
       }
 
-      final request = await HttpClient().getUrl(Uri.parse(url));
+      final request = await client.getUrl(Uri.parse(url));
       final response = await request.close();
 
       if (response.statusCode == 200) {
@@ -310,6 +323,8 @@ class _UserAvatarState extends State<_UserAvatar> {
       }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
+    } finally {
+      client.close();
     }
   }
 
