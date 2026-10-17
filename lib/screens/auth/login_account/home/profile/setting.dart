@@ -1,4 +1,5 @@
 import '../../login.dart';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -229,7 +230,9 @@ class SettingScreen extends StatelessWidget {
                       context: context,
                       builder: (dialogContext) => CupertinoAlertDialog(
                         title: const Text('Log out'),
-                        content: const Text('Are you sure to log out this account?'),
+                        content: const Text(
+                          'Are you sure to log out this account?',
+                        ),
                         actions: [
                           CupertinoDialogAction(
                             isDefaultAction: true,
@@ -240,6 +243,25 @@ class SettingScreen extends StatelessWidget {
                             isDestructiveAction: true,
                             onPressed: () async {
                               Navigator.pop(dialogContext);
+                              showCupertinoDialog(
+                                context: context,
+                                barrierDismissible: false,
+                                builder: (loadingContext) =>
+                                    const CupertinoAlertDialog(
+                                      content: Padding(
+                                        padding: EdgeInsets.all(12),
+                                        child: Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            CupertinoActivityIndicator(),
+                                            SizedBox(width: 12),
+                                            Text('Logging out...'),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                              );
                               await Supabase.instance.client.auth.signOut();
                               if (!context.mounted) return;
                               Navigator.of(context).pushAndRemoveUntil(

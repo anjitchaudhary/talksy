@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
@@ -279,6 +281,20 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<String> _cacheAvatarLocally(String url, String userId) async {
+    if (url.isEmpty) return '';
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final dir = await getApplicationDocumentsDirectory();
+        final file = File('${dir.path}/avatar_$userId.jpg');
+        await file.writeAsBytes(response.bodyBytes);
+        return file.path;
+      }
+    } catch (_) {}
+    return '';
+  }
+
   void _openOtpBottomSheet() {
     if (_activeEmail == null || _activeUserId == null || _expiresAt == null) {
       return;
@@ -317,6 +333,11 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                 final avatarUrl =
                     metadata['profile_image'] ?? metadata['avatar_url'] ?? '';
 
+                final localAvatarPath = await _cacheAvatarLocally(
+                  avatarUrl,
+                  user.id,
+                );
+
                 final savedAccountData = {
                   'id': user.id,
                   'email': _activeEmail,
@@ -324,6 +345,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                   'first_name': firstName,
                   'last_name': lastName,
                   'avatar_url': avatarUrl,
+                  'local_avatar_path': localAvatarPath,
+                  'last_login': DateTime.now().toIso8601String(),
                 };
 
                 final existingList =
@@ -613,20 +636,23 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
             Positioned(
               right: 20,
               bottom: 20,
-              child: FloatingActionButton(
-                mini: true,
-                backgroundColor: primary,
-                foregroundColor: Colors.white,
-                elevation: 4,
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    CupertinoPageRoute(
-                      builder: (_) => const SavedAccountScreen(),
-                    ),
-                  );
-                },
-                child: const Icon(Icons.manage_accounts_outlined, size: 20),
+              child: SizedBox(
+                width: 50,
+                height: 50,
+                child: FloatingActionButton(
+                  backgroundColor: primary,
+                  foregroundColor: Colors.white,
+                  elevation: 6,
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      CupertinoPageRoute(
+                        builder: (_) => const SavedAccountScreen(),
+                      ),
+                    );
+                  },
+                  child: const Icon(Icons.manage_accounts_outlined, size: 28),
+                ),
               ),
             ),
           ],
@@ -659,12 +685,32 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     final decoded = list
         .map((item) => jsonDecode(item) as Map<String, dynamic>)
         .toList();
+
+    decoded.sort((a, b) {
+      final timeA = DateTime.tryParse(a['last_login'] ?? '') ?? DateTime(2000);
+      final timeB = DateTime.tryParse(b['last_login'] ?? '') ?? DateTime(2000);
+      return timeB.compareTo(timeA);
+    });
+
     if (mounted) {
       setState(() {
         _savedAccounts = decoded;
         _isLoading = false;
       });
     }
+  }
+
+  String _getTimeAgo(String? timeStr) {
+    if (timeStr == null || timeStr.isEmpty) return 'Unknown';
+    final dt = DateTime.tryParse(timeStr);
+    if (dt == null) return 'Unknown';
+    final diff = DateTime.now().difference(dt);
+
+    if (diff.inSeconds < 60) return 'Just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    if (diff.inDays < 30) return '${diff.inDays}d ago';
+    return '${dt.day}/${dt.month}/${dt.year}';
   }
 
   Future<void> _deleteAccount(String id) async {
@@ -710,6 +756,7 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
     final email = account['email'];
     final password = account['password'];
+    final accountId = account['id'];
 
     showCupertinoDialog(
       context: context,
@@ -729,6 +776,15 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
       );
 
       if (res.user != null) {
+        final prefs = await SharedPreferences.getInstance();
+        account['last_login'] = DateTime.now().toIso8601String();
+
+        _savedAccounts.removeWhere((acc) => acc['id'] == accountId);
+        _savedAccounts.insert(0, account);
+
+        final encoded = _savedAccounts.map((acc) => jsonEncode(acc)).toList();
+        await prefs.setStringList('saved_accounts', encoded);
+
         if (!mounted) return;
         Navigator.pop(context);
         Navigator.of(context).pushAndRemoveUntil(
@@ -831,7 +887,37 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                   final displayName = fullName.isEmpty
                       ? acc['email']
                       : fullName;
+                  final localAvatarPath = acc['local_avatar_path'] ?? '';
                   final avatarUrl = acc['avatar_url'] ?? '';
+                  final lastLoginStr = acc['last_login'];
+                  final timeAgo = _getTimeAgo(lastLoginStr);
+
+                  Widget avatarWidget;
+                  if (localAvatarPath.isNotEmpty &&
+                      File(localAvatarPath).existsSync()) {
+                    avatarWidget = Image.file(
+                      File(localAvatarPath),
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Icon(
+                        Icons.person,
+                        color: isDark ? Colors.white70 : Colors.black54,
+                      ),
+                    );
+                  } else if (avatarUrl.isNotEmpty) {
+                    avatarWidget = Image.network(
+                      avatarUrl,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Icon(
+                        Icons.person,
+                        color: isDark ? Colors.white70 : Colors.black54,
+                      ),
+                    );
+                  } else {
+                    avatarWidget = Icon(
+                      Icons.person,
+                      color: isDark ? Colors.white70 : Colors.black54,
+                    );
+                  }
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
@@ -849,39 +935,38 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                           children: [
                             ClipOval(
                               child: Container(
-                                width: 44,
-                                height: 44,
+                                width: 48,
+                                height: 48,
                                 color: isDark
                                     ? Colors.grey.shade800
                                     : Colors.grey.shade200,
-                                child: avatarUrl.isNotEmpty
-                                    ? Image.network(
-                                        avatarUrl,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (_, _, _) => Icon(
-                                          Icons.person,
-                                          color: isDark
-                                              ? Colors.white70
-                                              : Colors.black54,
-                                        ),
-                                      )
-                                    : Icon(
-                                        Icons.person,
-                                        color: isDark
-                                            ? Colors.white70
-                                            : Colors.black54,
-                                      ),
+                                child: avatarWidget,
                               ),
                             ),
                             const SizedBox(width: 14),
                             Expanded(
-                              child: Text(
-                                displayName,
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  color: textColor,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    displayName,
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: textColor,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Last login: $timeAgo',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: isDark
+                                          ? Colors.grey.shade400
+                                          : Colors.grey.shade600,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                             CupertinoButton(

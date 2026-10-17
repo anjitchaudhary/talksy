@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'profile/profile.dart';
+import 'search_user.dart';
 
 class HomeScreen extends StatefulWidget {
   final bool showSuccessPopup;
@@ -108,7 +109,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     children: [
                       _buildIconButton(Icons.notifications_none, () {}, isDark),
                       const SizedBox(width: 8),
-                      _buildIconButton(Icons.search, () {}, isDark),
+                      _buildIconButton(Icons.search, () {
+                        Navigator.push(
+                          context,
+                          CupertinoPageRoute(
+                            builder: (context) => const SearchUserScreen(),
+                          ),
+                        );
+                      }, isDark),
                       const SizedBox(width: 10),
                       CupertinoButton(
                         padding: EdgeInsets.zero,
