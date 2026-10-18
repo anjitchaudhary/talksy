@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -28,6 +30,13 @@ const _months = [
 const _grey = Color(0xFF8E8E93);
 const _subStyle = TextStyle(fontSize: 10, height: 1.1, color: _grey);
 const _noNetMsg = 'Your connection is either slow or no connection!';
+
+const unsentLabel = 'Message is unsent';
+const _reactions = ['😡', '😩', '😭', '😅', '❤️', '👍'];
+const _holdTime = Duration(milliseconds: 500);
+const _editWindow = Duration(minutes: 30);
+const _sliderGap = 6.0;
+const _sliderRoom = 220.0;
 
 String _fmtDate(String? iso) {
   if (iso == null || iso.isEmpty) return '';
@@ -59,6 +68,37 @@ String _decode(String text) {
   }
 }
 
+String _nameOf(Map<String, dynamic> u) {
+  final full = '${u['first_name'] ?? ''} ${u['last_name'] ?? ''}'.trim();
+  if (full.isNotEmpty) return full;
+  final disp = (u['display_name'] ?? '').toString();
+  if (disp.isNotEmpty) return disp;
+  final mail = (u['email'] ?? '').toString();
+  return mail.isNotEmpty ? mail.split('@').first : 'User';
+}
+
+String _avatarOf(Map<String, dynamic> u) {
+  final raw = u['avatar_url'];
+  if (raw is! String) return '';
+  final url = raw.trim();
+  if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
+    return '';
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  try {
+    return Supabase.instance.client.storage.from('avatars').getPublicUrl(url);
+  } catch (_) {
+    return url;
+  }
+}
+
+bool _isUnsent(Map<String, dynamic> m) => m['is_unsent'] == true;
+
+Rect _rectOf(BuildContext context) {
+  final box = context.findRenderObject() as RenderBox;
+  return box.localToGlobal(Offset.zero) & box.size;
+}
+
 class ChatScreen extends StatefulWidget {
   final Map<String, dynamic> user;
 
@@ -70,6 +110,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
+  final _focus = FocusNode();
   final _scroll = ScrollController();
   final _db = Supabase.instance.client;
   final _presence = PresenceService.instance;
@@ -78,6 +119,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final _pending = <String>{};
 
   List<Map<String, dynamic>> _msgs = [];
+  Map<String, dynamic> _meProfile = {};
+  Map<String, dynamic>? _replying;
+  Map<String, dynamic>? _editing;
   bool _loading = true;
   Timer? _noticeTimer;
   StreamSubscription? _msgSub;
@@ -85,6 +129,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String get _me => _db.auth.currentUser?.id ?? '';
   String get _other => (widget.user['id'] ?? '').toString();
+
+  Map<String, dynamic> get _meUser {
+    if (_meProfile.isNotEmpty) return _meProfile;
+    final auth = _db.auth.currentUser;
+    return {...?auth?.userMetadata, 'email': auth?.email};
+  }
 
   @override
   void initState() {
@@ -110,11 +160,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _lastSeen.dispose();
     _notice.dispose();
     _input.dispose();
+    _focus.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
   Future<void> _init() async {
+    unawaited(_loadMe());
     await _loadLocal();
     _listenMessages();
     _listenProfile();
@@ -131,6 +183,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<File> _localFile() async {
     final dir = await getApplicationDocumentsDirectory();
     return File('${dir.path}/chat_${_me}_$_other.json');
+  }
+
+  Future<File> _meFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/profile_$_me.json');
   }
 
   Future<void> _loadLocal() async {
@@ -151,6 +208,30 @@ class _ChatScreenState extends State<ChatScreen> {
       final file = await _localFile();
       final saved = _msgs.where((m) => !_pending.contains(m['id'])).toList();
       await file.writeAsString(jsonEncode(saved));
+    } catch (_) {}
+  }
+
+  Future<void> _loadMe() async {
+    if (_me.isEmpty) return;
+    try {
+      final file = await _meFile();
+      if (await file.exists()) {
+        final saved = jsonDecode(await file.readAsString()) as Map;
+        if (mounted) {
+          setState(() => _meProfile = Map<String, dynamic>.from(saved));
+        }
+      }
+      unawaited(_ChatUserAvatar.fetch(_avatarOf(_meUser)));
+
+      final row = await _db
+          .from('profiles')
+          .select('first_name, last_name, display_name, email, avatar_url')
+          .eq('id', _me)
+          .maybeSingle();
+      if (row == null) return;
+      await file.writeAsString(jsonEncode(row));
+      if (mounted) setState(() => _meProfile = row);
+      unawaited(_ChatUserAvatar.fetch(_avatarOf(row)));
     } catch (_) {}
   }
 
@@ -248,6 +329,27 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  Map<String, dynamic>? _find(dynamic id) {
+    if (id == null) return null;
+    for (final m in _msgs) {
+      if (m['id'] == id) return m;
+    }
+    return null;
+  }
+
+  String _who(Map<String, dynamic> m) {
+    return m['sender_id'] == _me ? 'You' : _nameOf(widget.user);
+  }
+
+  String _preview(Map<String, dynamic> m) {
+    return _isUnsent(m) ? unsentLabel : _decode(m['message'] ?? '');
+  }
+
+  bool _canEdit(Map<String, dynamic> m) {
+    final at = _parseTime(m['created_at']);
+    return at != null && DateTime.now().difference(at) <= _editWindow;
+  }
+
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _me.isEmpty || _other.isEmpty) return;
@@ -257,8 +359,15 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    if (_editing != null) {
+      await _commitEdit(text);
+      return;
+    }
+
     _input.clear();
 
+    final reply = _replying;
+    final replyId = reply?['id'];
     final body = _encode(text);
     final status = _presence.onlineIds.value.contains(_other)
         ? 'delivered'
@@ -267,12 +376,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _pending.add(tempId);
     setState(() {
+      _replying = null;
       _msgs.add({
         'id': tempId,
         'sender_id': _me,
         'receiver_id': _other,
         'message': body,
         'status': status,
+        'reply_to': replyId,
+        'is_unsent': false,
         'created_at': DateTime.now().toIso8601String(),
       });
     });
@@ -286,6 +398,7 @@ class _ChatScreenState extends State<ChatScreen> {
             'receiver_id': _other,
             'message': body,
             'status': status,
+            'reply_to': ?replyId,
           })
           .select()
           .single();
@@ -300,7 +413,10 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       _pending.remove(tempId);
       if (!mounted) return;
-      setState(() => _msgs.removeWhere((m) => m['id'] == tempId));
+      setState(() {
+        _msgs.removeWhere((m) => m['id'] == tempId);
+        _replying ??= reply;
+      });
       _input.value = TextEditingValue(
         text: text,
         selection: TextSelection.collapsed(offset: text.length),
@@ -309,29 +425,152 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  String _avatarUrl() {
-    final raw = widget.user['avatar_url'];
-    if (raw is! String) return '';
-    final url = raw.trim();
-    if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
-      return '';
+  Future<void> _mutate(
+    String id,
+    Map<String, dynamic> changes,
+    String fn,
+    Map<String, dynamic> params,
+  ) async {
+    if (!_presence.connected.value) {
+      _flashNotice();
+      return;
     }
-    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+
+    final i = _msgs.indexWhere((m) => m['id'] == id);
+    if (i == -1) return;
+    final before = _msgs[i];
+    setState(() => _msgs[i] = {...before, ...changes});
+    _saveLocal();
+
     try {
-      return _db.storage.from('avatars').getPublicUrl(url);
+      final ok = await _db.rpc(fn, params: params);
+      if (ok != true) throw StateError('rejected');
     } catch (_) {
-      return url;
+      if (!mounted) return;
+      final j = _msgs.indexWhere((m) => m['id'] == id);
+      if (j != -1) setState(() => _msgs[j] = before);
+      _saveLocal();
+      _flashNotice();
     }
   }
 
-  String _title() {
-    final u = widget.user;
-    final full = '${u['first_name'] ?? ''} ${u['last_name'] ?? ''}'.trim();
-    if (full.isNotEmpty) return full;
-    final disp = (u['display_name'] ?? '').toString();
-    if (disp.isNotEmpty) return disp;
-    final mail = (u['email'] ?? '').toString();
-    return mail.isNotEmpty ? mail.split('@').first : 'User';
+  void _react(Map<String, dynamic> m, String? emoji) {
+    _mutate(
+      m['id'],
+      {
+        'reaction': emoji,
+        'reacted_at': emoji == null
+            ? null
+            : DateTime.now().toUtc().toIso8601String(),
+      },
+      'react_message',
+      {'p_id': m['id'], 'p_emoji': emoji},
+    );
+  }
+
+  void _unsend(Map<String, dynamic> m) {
+    if (_editing?['id'] == m['id'] || _replying?['id'] == m['id']) {
+      _cancelCompose();
+    }
+    _mutate(
+      m['id'],
+      {'is_unsent': true, 'message': '', 'reaction': null, 'reacted_at': null},
+      'unsend_message',
+      {'p_id': m['id']},
+    );
+  }
+
+  Future<void> _commitEdit(String text) async {
+    final target = _editing;
+    if (target == null) return;
+
+    final unchanged = text == _decode(target['message'] ?? '');
+    if (unchanged || !_canEdit(target)) {
+      _cancelCompose();
+      return;
+    }
+
+    final body = _encode(text);
+    _cancelCompose();
+    await _mutate(
+      target['id'],
+      {'message': body, 'is_edited': true},
+      'edit_message',
+      {'p_id': target['id'], 'p_message': body},
+    );
+  }
+
+  void _startEdit(Map<String, dynamic> m) {
+    _cancelCompose();
+    final text = _decode(m['message'] ?? '');
+    setState(() => _editing = m);
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _focus.requestFocus();
+  }
+
+  void _startReply(Map<String, dynamic> m) {
+    _cancelCompose();
+    setState(() => _replying = m);
+    _focus.requestFocus();
+  }
+
+  void _cancelCompose() {
+    final wasEditing = _editing != null;
+    setState(() {
+      _editing = null;
+      _replying = null;
+    });
+    if (wasEditing) _input.clear();
+  }
+
+  void _onHold(Map<String, dynamic> m, Rect anchor) {
+    if (_pending.contains(m['id']) || _isUnsent(m)) return;
+    HapticFeedback.mediumImpact();
+
+    final mine = m['sender_id'] == _me;
+    final text = _decode(m['message'] ?? '');
+    void copy() => Clipboard.setData(ClipboardData(text: text));
+
+    showSlider(
+      context: context,
+      anchor: anchor,
+      alignRight: mine,
+      child: mine
+          ? SentSlider(
+              canEdit: _canEdit(m),
+              onCopy: copy,
+              onEdit: () => _startEdit(m),
+              onReply: () => _startReply(m),
+              onUnsend: () => _unsend(m),
+            )
+          : ReceivedSlider(
+              current: (m['reaction'] ?? '').toString(),
+              onReact: (e) => _react(m, e == m['reaction'] ? null : e),
+              onCopy: copy,
+              onReply: () => _startReply(m),
+            ),
+    );
+  }
+
+  void _showReactor(Map<String, dynamic> m, Rect anchor) {
+    final byMe = m['sender_id'] != _me;
+    final user = byMe ? _meUser : widget.user;
+
+    showSlider(
+      context: context,
+      anchor: anchor,
+      alignRight: !byMe,
+      child: ReactSlider(
+        name: _nameOf(user),
+        avatarUrl: _avatarOf(user),
+        emoji: (m['reaction'] ?? '').toString(),
+        removable: byMe,
+        onRemove: () => _react(m, null),
+      ),
+    );
   }
 
   @override
@@ -368,7 +607,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Icon(Icons.arrow_back_ios_new, size: 20, color: txt),
                 ),
                 const SizedBox(width: 8),
-                _ChatUserAvatar(url: _avatarUrl(), isDark: dark),
+                _ChatUserAvatar(url: _avatarOf(widget.user), isDark: dark),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -376,7 +615,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        _title(),
+                        _nameOf(widget.user),
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 16,
@@ -421,7 +660,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               Divider(height: 0.5, thickness: 0.5, color: line),
-              Container(color: bg, child: _buildInput(txt, field)),
+              Container(
+                color: bg,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [_buildComposeBar(), _buildInput(txt, field)],
+                ),
+              ),
             ],
           ),
         ),
@@ -479,6 +724,7 @@ class _ChatScreenState extends State<ChatScreen> {
       itemCount: _msgs.length,
       itemBuilder: (context, i) {
         final m = _msgs[_msgs.length - 1 - i];
+        final replied = _find(m['reply_to']);
         return MessageBubble(
           key: ValueKey(m['id']),
           message: _decode(m['message'] ?? ''),
@@ -486,8 +732,73 @@ class _ChatScreenState extends State<ChatScreen> {
           isMe: m['sender_id'] == _me,
           isDark: dark,
           status: m['status'] ?? 'sent',
+          unsent: _isUnsent(m),
+          edited: m['is_edited'] == true,
+          reaction: (m['reaction'] ?? '').toString(),
+          replyWho: replied == null ? null : _who(replied),
+          replyText: replied == null ? null : _preview(replied),
+          onHold: (rect) => _onHold(m, rect),
+          onReactionTap: (rect) => _showReactor(m, rect),
         );
       },
+    );
+  }
+
+  Widget _buildComposeBar() {
+    final target = _editing ?? _replying;
+    if (target == null) return const SizedBox.shrink();
+
+    final title = _editing != null
+        ? 'Edit message'
+        : target['sender_id'] == _me
+        ? 'Replying to yourself'
+        : 'Replying to ${_nameOf(widget.user)}';
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 34,
+            decoration: BoxDecoration(
+              color: CupertinoColors.activeBlue,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: CupertinoColors.activeBlue,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _preview(target),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, color: _grey),
+                ),
+              ],
+            ),
+          ),
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(36, 36),
+            onPressed: _cancelCompose,
+            child: const Icon(Icons.close, size: 20, color: _grey),
+          ),
+        ],
+      ),
     );
   }
 
@@ -515,6 +826,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   reverse: true,
                   child: TextField(
                     controller: _input,
+                    focusNode: _focus,
                     maxLines: null,
                     keyboardType: TextInputType.multiline,
                     style: TextStyle(fontSize: 15, color: txt),
@@ -544,8 +856,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   color: CupertinoColors.activeBlue,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
-                  Icons.send_rounded,
+                child: Icon(
+                  _editing != null ? Icons.check_rounded : Icons.send_rounded,
                   size: 18,
                   color: Colors.white,
                 ),
@@ -644,6 +956,13 @@ class MessageBubble extends StatelessWidget {
   final bool isMe;
   final bool isDark;
   final String status;
+  final bool unsent;
+  final bool edited;
+  final String reaction;
+  final String? replyWho;
+  final String? replyText;
+  final ValueChanged<Rect> onHold;
+  final ValueChanged<Rect> onReactionTap;
 
   const MessageBubble({
     super.key,
@@ -652,6 +971,13 @@ class MessageBubble extends StatelessWidget {
     required this.isMe,
     required this.isDark,
     required this.status,
+    required this.unsent,
+    required this.edited,
+    required this.reaction,
+    required this.onHold,
+    required this.onReactionTap,
+    this.replyWho,
+    this.replyText,
   });
 
   Widget _tick() {
@@ -667,6 +993,122 @@ class MessageBubble extends StatelessWidget {
       default:
         return const Icon(Icons.check, size: 12, color: _grey);
     }
+  }
+
+  Widget _quote(Color fg) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+          decoration: BoxDecoration(
+            color: fg.withValues(alpha: 0.14),
+            border: Border(
+              left: BorderSide(
+                color: isMe ? Colors.white : CupertinoColors.activeBlue,
+                width: 3,
+              ),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                replyWho ?? '',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
+              ),
+              Text(
+                replyText ?? '',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: fg.withValues(alpha: 0.8),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _body(Color bg, Color fg) {
+    final quoted = !unsent && replyText != null;
+    final text = Text(
+      unsent ? unsentLabel : message,
+      style: TextStyle(
+        fontSize: 15,
+        color: unsent ? fg.withValues(alpha: 0.7) : fg,
+        fontStyle: unsent ? FontStyle.italic : FontStyle.normal,
+      ),
+    );
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: quoted
+          ? IntrinsicWidth(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [_quote(fg), text],
+              ),
+            )
+          : text,
+    );
+  }
+
+  Widget _chip() {
+    return Builder(
+      builder: (context) {
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => onReactionTap(_rectOf(context)),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE9E9EB),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isDark ? const Color(0xFF121212) : Colors.white,
+                width: 1.5,
+              ),
+            ),
+            child: Text(reaction, style: const TextStyle(fontSize: 12)),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _meta() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, left: 4, right: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (edited && !unsent) ...[
+            const Text('Edited', style: TextStyle(fontSize: 8, color: _grey)),
+            const SizedBox(width: 4),
+          ],
+          if (date.isNotEmpty)
+            Text(date, style: const TextStyle(fontSize: 8, color: _grey)),
+          if (isMe && date.isNotEmpty) const SizedBox(width: 4),
+          if (isMe) _tick(),
+        ],
+      ),
+    );
   }
 
   @override
@@ -685,36 +1127,441 @@ class MessageBubble extends StatelessWidget {
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: isMe ? CupertinoColors.activeBlue : theirBg,
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: Text(
-                message,
-                style: TextStyle(
-                  fontSize: 15,
-                  color: isMe ? Colors.white : theirTxt,
+            Stack(
+              children: [
+                Padding(
+                  padding: EdgeInsets.only(bottom: reaction.isEmpty ? 0 : 10),
+                  child: Builder(
+                    builder: (context) {
+                      return _HoldDetector(
+                        onHold: () => onHold(_rectOf(context)),
+                        child: _body(
+                          isMe ? CupertinoColors.activeBlue : theirBg,
+                          isMe ? Colors.white : theirTxt,
+                        ),
+                      );
+                    },
+                  ),
                 ),
-              ),
+                if (reaction.isNotEmpty)
+                  Positioned(
+                    bottom: 0,
+                    left: isMe ? null : 8,
+                    right: isMe ? 8 : null,
+                    child: _chip(),
+                  ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.only(top: 2, left: 4, right: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (date.isNotEmpty)
-                    Text(
-                      date,
-                      style: const TextStyle(fontSize: 8, color: _grey),
-                    ),
-                  if (isMe && date.isNotEmpty) const SizedBox(width: 4),
-                  if (isMe) _tick(),
-                ],
-              ),
+            _meta(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HoldDetector extends StatefulWidget {
+  final VoidCallback onHold;
+  final Widget child;
+
+  const _HoldDetector({required this.onHold, required this.child});
+
+  @override
+  State<_HoldDetector> createState() => _HoldDetectorState();
+}
+
+class _HoldDetectorState extends State<_HoldDetector> {
+  Timer? _timer;
+  Offset _start = Offset.zero;
+
+  void _begin(PointerDownEvent e) {
+    _start = e.position;
+    _timer?.cancel();
+    _timer = Timer(_holdTime, widget.onHold);
+  }
+
+  void _move(PointerMoveEvent e) {
+    if ((e.position - _start).distance > 12) _cancel();
+  }
+
+  void _cancel() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: _begin,
+      onPointerMove: _move,
+      onPointerUp: (_) => _cancel(),
+      onPointerCancel: (_) => _cancel(),
+      child: widget.child,
+    );
+  }
+}
+
+Future<void> showSlider({
+  required BuildContext context,
+  required Rect anchor,
+  required bool alignRight,
+  required Widget child,
+}) {
+  return showGeneralDialog(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Dismiss',
+    barrierColor: const Color(0x14000000),
+    transitionDuration: const Duration(milliseconds: 180),
+    pageBuilder: (context, animation, secondary) {
+      return _SliderPlacement(
+        anchor: anchor,
+        alignRight: alignRight,
+        child: child,
+      );
+    },
+    transitionBuilder: (context, animation, secondary, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, -0.08),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+class _SliderPlacement extends StatelessWidget {
+  final Rect anchor;
+  final bool alignRight;
+  final Widget child;
+
+  const _SliderPlacement({
+    required this.anchor,
+    required this.alignRight,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final bottomGap =
+        MediaQuery.paddingOf(context).bottom +
+        MediaQuery.viewInsetsOf(context).bottom;
+    final below = size.height - bottomGap - anchor.bottom > _sliderRoom;
+    final edge = alignRight ? size.width - anchor.right : anchor.left;
+    final side = edge < 12 ? 12.0 : edge;
+
+    return Stack(
+      children: [
+        Positioned(
+          left: alignRight ? null : side,
+          right: alignRight ? side : null,
+          top: below ? anchor.bottom + _sliderGap : null,
+          bottom: below ? null : size.height - anchor.top + _sliderGap,
+          child: child,
+        ),
+      ],
+    );
+  }
+}
+
+class _SliderBox extends StatelessWidget {
+  final double width;
+  final Widget child;
+
+  const _SliderBox({required this.width, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
+    return Material(
+      type: MaterialType.transparency,
+      child: Container(
+        width: width,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x33000000),
+              blurRadius: 24,
+              offset: Offset(0, 8),
             ),
           ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: ColoredBox(
+              color: dark ? const Color(0xE62C2C2E) : const Color(0xE6F7F7F7),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SliderRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+
+  const _SliderRow({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final tap = onTap;
+    final color = tap == null
+        ? _grey.withValues(alpha: 0.6)
+        : danger
+        ? CupertinoColors.systemRed
+        : (dark ? Colors.white : Colors.black87);
+
+    return InkWell(
+      onTap: tap == null
+          ? null
+          : () {
+              Navigator.pop(context);
+              tap();
+            },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, size: 19, color: color),
+            const SizedBox(width: 12),
+            Text(label, style: TextStyle(fontSize: 15, color: color)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SliderDivider extends StatelessWidget {
+  const _SliderDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Divider(height: 0.3, thickness: 0.3, color: Color(0x598E8E93));
+  }
+}
+
+class SentSlider extends StatelessWidget {
+  final bool canEdit;
+  final VoidCallback onCopy;
+  final VoidCallback onEdit;
+  final VoidCallback onReply;
+  final VoidCallback onUnsend;
+
+  const SentSlider({
+    super.key,
+    required this.canEdit,
+    required this.onCopy,
+    required this.onEdit,
+    required this.onReply,
+    required this.onUnsend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _SliderBox(
+      width: 210,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _SliderRow(
+            icon: Icons.content_copy_rounded,
+            label: 'Copy',
+            onTap: onCopy,
+          ),
+          const _SliderDivider(),
+          _SliderRow(
+            icon: Icons.edit_outlined,
+            label: 'Edit',
+            onTap: canEdit ? onEdit : null,
+          ),
+          const _SliderDivider(),
+          _SliderRow(icon: Icons.reply_rounded, label: 'Reply', onTap: onReply),
+          const _SliderDivider(),
+          _SliderRow(
+            icon: Icons.undo_rounded,
+            label: 'Unsent',
+            onTap: onUnsend,
+            danger: true,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ReceivedSlider extends StatelessWidget {
+  final String current;
+  final ValueChanged<String> onReact;
+  final VoidCallback onCopy;
+  final VoidCallback onReply;
+
+  const ReceivedSlider({
+    super.key,
+    required this.current,
+    required this.onReact,
+    required this.onCopy,
+    required this.onReply,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _SliderBox(
+      width: 256,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                for (final e in _reactions)
+                  _EmojiButton(
+                    emoji: e,
+                    selected: e == current,
+                    onTap: () {
+                      Navigator.pop(context);
+                      onReact(e);
+                    },
+                  ),
+              ],
+            ),
+          ),
+          const _SliderDivider(),
+          _SliderRow(
+            icon: Icons.content_copy_rounded,
+            label: 'Copy',
+            onTap: onCopy,
+          ),
+          const _SliderDivider(),
+          _SliderRow(icon: Icons.reply_rounded, label: 'Reply', onTap: onReply),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmojiButton extends StatelessWidget {
+  final String emoji;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _EmojiButton({
+    required this.emoji,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        width: 38,
+        height: 38,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: selected ? _grey.withValues(alpha: 0.28) : null,
+        ),
+        child: Text(emoji, style: const TextStyle(fontSize: 24)),
+      ),
+    );
+  }
+}
+
+class ReactSlider extends StatelessWidget {
+  final String name;
+  final String avatarUrl;
+  final String emoji;
+  final bool removable;
+  final VoidCallback onRemove;
+
+  const ReactSlider({
+    super.key,
+    required this.name,
+    required this.avatarUrl,
+    required this.emoji,
+    required this.removable,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
+    return _SliderBox(
+      width: 230,
+      child: InkWell(
+        onTap: removable
+            ? () {
+                Navigator.pop(context);
+                onRemove();
+              }
+            : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              _ChatUserAvatar(url: avatarUrl, isDark: dark, size: 30),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: dark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    if (removable)
+                      const Text('Tap to remove', style: _subStyle),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(emoji, style: const TextStyle(fontSize: 22)),
+            ],
+          ),
         ),
       ),
     );
@@ -783,8 +1630,44 @@ class _ChatSkeletonLoaderState extends State<ChatSkeletonLoader>
 class _ChatUserAvatar extends StatefulWidget {
   final String url;
   final bool isDark;
+  final double size;
 
-  const _ChatUserAvatar({required this.url, required this.isDark});
+  const _ChatUserAvatar({
+    required this.url,
+    required this.isDark,
+    this.size = 34,
+  });
+
+  static final _cache = <String, File>{};
+
+  static Future<File?> fetch(String url) async {
+    final key = url.trim();
+    if (key.isEmpty) return null;
+
+    final known = _cache[key];
+    if (known != null) return known;
+
+    final client = HttpClient();
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/avatar_chat_${key.hashCode.abs()}.png');
+
+      if (await file.exists() && await file.length() > 0) {
+        return _cache[key] = file;
+      }
+
+      final req = await client.getUrl(Uri.parse(key));
+      final res = await req.close();
+      if (res.statusCode != 200) return null;
+
+      await file.writeAsBytes(await consolidateHttpClientResponseBytes(res));
+      return _cache[key] = file;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close();
+    }
+  }
 
   @override
   State<_ChatUserAvatar> createState() => _ChatUserAvatarState();
@@ -792,7 +1675,6 @@ class _ChatUserAvatar extends StatefulWidget {
 
 class _ChatUserAvatarState extends State<_ChatUserAvatar> {
   static const _silver = Color(0xFFC0C0C0);
-  static final _cache = <String, File>{};
 
   File? _file;
   bool _busy = false;
@@ -816,18 +1698,20 @@ class _ChatUserAvatarState extends State<_ChatUserAvatar> {
       _busy = false;
       return;
     }
-    if (_cache.containsKey(url)) {
-      _file = _cache[url];
+
+    final known = _ChatUserAvatar._cache[url];
+    if (known != null) {
+      _file = known;
       _busy = false;
       return;
     }
+
     _file = null;
     _busy = true;
-    _download(url);
+    _ChatUserAvatar.fetch(url).then((file) => _done(url, file));
   }
 
   void _done(String url, File? file) {
-    if (file != null) _cache[url] = file;
     if (!mounted || widget.url.trim() != url) return;
     setState(() {
       _file = file;
@@ -835,44 +1719,14 @@ class _ChatUserAvatarState extends State<_ChatUserAvatar> {
     });
   }
 
-  Future<void> _download(String url) async {
-    final client = HttpClient();
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/avatar_chat_${url.hashCode.abs()}.png');
-
-      if (await file.exists()) {
-        _done(url, file);
-        return;
-      }
-
-      final req = await client.getUrl(Uri.parse(url));
-      final res = await req.close();
-      if (res.statusCode != 200) {
-        _done(url, null);
-        return;
-      }
-
-      final bytes = await res.fold<List<int>>(
-        [],
-        (all, part) => all..addAll(part),
-      );
-      await file.writeAsBytes(bytes);
-      _done(url, file);
-    } catch (_) {
-      _done(url, null);
-    } finally {
-      client.close();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final dark = widget.isDark;
+    final size = widget.size;
 
     return Container(
-      width: 34,
-      height: 34,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: dark ? const Color(0xFF222222) : const Color(0xFFECECEC),
@@ -881,21 +1735,29 @@ class _ChatUserAvatarState extends State<_ChatUserAvatar> {
           width: 0.8,
         ),
       ),
-      child: ClipOval(child: _content(dark)),
+      child: ClipOval(child: _content(dark, size)),
     );
   }
 
-  Widget _content(bool dark) {
+  Widget _content(bool dark, double size) {
+    final icon = Icon(
+      Icons.person,
+      size: size * 0.53,
+      color: dark ? Colors.white70 : Colors.black54,
+    );
+
     if (_file != null) {
-      return Image.file(_file!, width: 34, height: 34, fit: BoxFit.cover);
+      return Image.file(
+        _file!,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stack) => icon,
+      );
     }
     if (_busy) {
       return const Center(child: CupertinoActivityIndicator(radius: 6));
     }
-    return Icon(
-      Icons.person,
-      size: 18,
-      color: dark ? Colors.white70 : Colors.black54,
-    );
+    return icon;
   }
 }

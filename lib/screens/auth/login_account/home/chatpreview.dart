@@ -70,10 +70,33 @@ class _Preview {
   final String text;
   final String status;
   final bool mine;
+  final bool unsent;
+  final String reaction;
+  final String reactedText;
+  final bool youReacted;
   final int unread;
   final DateTime? at;
+  final DateTime? reactedAt;
 
-  String get line => mine ? 'You: $text' : text;
+  bool get reacted {
+    final r = reactedAt;
+    final t = at;
+    return reaction.isNotEmpty && r != null && (t == null || r.isAfter(t));
+  }
+
+  bool get italic => unsent && !reacted;
+
+  DateTime? get shownAt => reacted ? reactedAt : at;
+
+  String get line {
+    if (reacted) {
+      return youReacted
+          ? 'You reacted $reaction to "$reactedText"'
+          : 'Reacted your message $reaction';
+    }
+    if (unsent) return mine ? 'You: $unsentLabel' : unsentLabel;
+    return mine ? 'You: $text' : text;
+  }
 
   const _Preview({
     required this.raw,
@@ -83,12 +106,19 @@ class _Preview {
     required this.text,
     required this.status,
     required this.mine,
+    required this.unsent,
+    required this.reaction,
+    required this.reactedText,
+    required this.youReacted,
     required this.unread,
     required this.at,
+    required this.reactedAt,
   });
 
   factory _Preview.from(Map<String, dynamic> r, String me) {
     final time = r['last_at'];
+    final reactTime = r['last_reaction_at'];
+    final reactedSender = r['last_reaction_sender_id'];
     return _Preview(
       raw: r,
       id: (r['id'] ?? '').toString(),
@@ -97,8 +127,15 @@ class _Preview {
       text: _decode((r['last_message'] ?? '').toString()),
       status: (r['last_status'] ?? 'sent').toString(),
       mine: r['last_sender_id'] == me,
+      unsent: r['last_unsent'] == true,
+      reaction: (r['last_reaction'] ?? '').toString(),
+      reactedText: _decode((r['last_reaction_message'] ?? '').toString()),
+      youReacted: reactedSender != null && reactedSender != me,
       unread: (r['unread_count'] as num?)?.toInt() ?? 0,
       at: time is String ? DateTime.tryParse(time)?.toLocal() : null,
+      reactedAt: reactTime is String
+          ? DateTime.tryParse(reactTime)?.toLocal()
+          : null,
     );
   }
 }
@@ -421,7 +458,7 @@ class _PreviewTile extends StatelessWidget {
   });
 
   Widget _trailing() {
-    if (chat.mine) return _StatusTick(status: chat.status);
+    if (chat.mine && !chat.reacted) return _StatusTick(status: chat.status);
     if (chat.unread > 0) return BubbleCount(count: chat.unread);
     return const SizedBox.shrink();
   }
@@ -469,7 +506,7 @@ class _PreviewTile extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        _fmtTime(chat.at),
+                        _fmtTime(chat.shownAt),
                         style: const TextStyle(fontSize: 11, color: _grey),
                       ),
                     ],
@@ -484,7 +521,13 @@ class _PreviewTile extends StatelessWidget {
                             chat.line,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 14, color: sub),
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: sub,
+                              fontStyle: chat.italic
+                                  ? FontStyle.italic
+                                  : FontStyle.normal,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 8),
