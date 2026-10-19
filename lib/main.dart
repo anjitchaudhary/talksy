@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
@@ -15,6 +16,10 @@ Future<void> main() async {
   await Supabase.initialize(
     url: dotenv.get('SUPABASE_URL'),
     publishableKey: dotenv.get('SUPABASE_PUBLISHABLE_KEY'),
+  );
+
+  await GoogleSignIn.instance.initialize(
+    serverClientId: dotenv.maybeGet('GOOGLE_WEB_CLIENT_ID'),
   );
 
   runApp(const MyApp());

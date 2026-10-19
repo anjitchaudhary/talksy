@@ -1,12 +1,12 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,6 +15,85 @@ import 'package:talksy/screens/auth/entryscreen.dart';
 
 import 'home/home.dart';
 
+SupabaseClient get _db => Supabase.instance.client;
+
+final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+Future<void> _enterHome(NavigatorState nav, String userId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('otp_verified_$userId', true);
+
+  nav.pushAndRemoveUntil(
+    CupertinoPageRoute(
+      builder: (_) => const HomeScreen(showSuccessPopup: false),
+    ),
+    (route) => false,
+  );
+}
+
+class _GoogleLoginException implements Exception {
+  const _GoogleLoginException(this.message);
+
+  final String message;
+}
+
+class _GoogleAuth {
+  static Future<void> signOut() async {
+    try {
+      await GoogleSignIn.instance.signOut();
+    } catch (_) {}
+  }
+
+  static Future<User> signIn({String? expectedEmail}) async {
+    final account = await GoogleSignIn.instance.authenticate();
+    final email = account.email.trim().toLowerCase();
+
+    if (expectedEmail != null && email != expectedEmail.toLowerCase()) {
+      await signOut();
+      throw _GoogleLoginException('Please sign in with $expectedEmail.');
+    }
+
+    final registered = await _db.rpc(
+      'check_email_exists',
+      params: {'email_input': email},
+    );
+    if (registered != true) {
+      await signOut();
+      throw const _GoogleLoginException('This email is not registered.');
+    }
+
+    final idToken = account.authentication.idToken;
+    if (idToken == null) {
+      throw const AuthException('Missing Google ID token');
+    }
+
+    final res = await _db.auth.signInWithIdToken(
+      provider: OAuthProvider.google,
+      idToken: idToken,
+    );
+    final user = res.user;
+    if (user == null) {
+      throw const AuthException('No user returned');
+    }
+    return user;
+  }
+
+  static String? messageFor(Object error, {required String fallback}) {
+    if (error is GoogleSignInException) {
+      debugPrint('Google error: ${error.code} | ${error.description}');
+    } else {
+      debugPrint('Sign in error: $error');
+    }
+
+    if (error is GoogleSignInException) {
+      if (error.code == GoogleSignInExceptionCode.canceled) return null;
+      return 'Google sign in failed. Please try again.';
+    }
+    if (error is _GoogleLoginException) return error.message;
+    return fallback;
+  }
+}
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -22,43 +101,30 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
+class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _emailCtrl = TextEditingController();
   final TextEditingController _passCtrl = TextEditingController();
 
   bool _isAuthenticating = false;
+  bool _isGoogleLoading = false;
   bool _obscurePassword = true;
   bool _isButtonEnabled = false;
   bool _rememberPassword = false;
 
-  String? _activeEmail;
-  String? _activeUserId;
-  DateTime? _expiresAt;
-  Timer? _bgTimer;
+  bool get _busy => _isAuthenticating || _isGoogleLoading;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _emailCtrl.addListener(_validateInput);
     _passCtrl.addListener(_validateInput);
-    _checkExistingSession();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _emailCtrl.dispose();
     _passCtrl.dispose();
-    _bgTimer?.cancel();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _activeEmail != null) {
-      _syncBackendStatus(_activeEmail!);
-    }
   }
 
   void _validateInput() {
@@ -69,276 +135,115 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _checkExistingSession() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedEmail = prefs.getString('pending_login_email');
-    final savedUserId = prefs.getString('pending_login_uid');
-    final savedExpiry = prefs.getString('pending_login_expires');
-
-    if (savedEmail != null && savedUserId != null && savedExpiry != null) {
-      final expiryDate = DateTime.tryParse(savedExpiry);
-      if (expiryDate != null && DateTime.now().isBefore(expiryDate)) {
-        await _syncBackendStatus(
-          savedEmail,
-          uid: savedUserId,
-          autoOpenBottomSheet: true,
-        );
-      } else {
-        await _clearPendingSession();
-      }
-    }
-  }
-
-  void _startBackgroundTimer() {
-    _bgTimer?.cancel();
-    _bgTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_expiresAt != null && DateTime.now().isAfter(_expiresAt!)) {
-        timer.cancel();
-        _clearPendingSession();
-      }
-    });
-  }
-
-  Future<void> _clearPendingSession() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('pending_login_email');
-    await prefs.remove('pending_login_uid');
-    await prefs.remove('pending_login_expires');
-
-    if (mounted) {
-      setState(() {
-        _activeEmail = null;
-        _activeUserId = null;
-        _expiresAt = null;
-      });
-    }
-  }
-
-  Future<void> _syncBackendStatus(
-    String email, {
-    String? uid,
-    bool autoOpenBottomSheet = false,
-  }) async {
-    try {
-      final res = await Supabase.instance.client.rpc(
-        'get_otp_status',
-        params: {'p_email': email},
-      );
-
-      if (res != null && res['exists'] == true) {
-        final expiryStr = res['expires_at'];
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('pending_login_email', email);
-        if (uid != null) await prefs.setString('pending_login_uid', uid);
-        await prefs.setString('pending_login_expires', expiryStr);
-
-        if (!mounted) return;
-        setState(() {
-          _activeEmail = email;
-          if (uid != null) _activeUserId = uid;
-          _expiresAt = DateTime.parse(expiryStr).toLocal();
-        });
-
-        _startBackgroundTimer();
-        if (autoOpenBottomSheet) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _openOtpBottomSheet();
-          });
-        }
-      } else {
-        await _clearPendingSession();
-      }
-    } catch (_) {}
-  }
-
-  Future<String?> _sendEmailOtp(String email, String otp) async {
-    final apiKey = dotenv.env['BREVO_API_KEY'];
-    final mailFrom = dotenv.env['MAIL_FROM'];
-    if (apiKey == null || mailFrom == null) return 'Configuration missing';
-
-    final htmlContent =
-        '''
-<!DOCTYPE html>
-<html lang="en">
-<body style="margin:0;padding:48px 16px;background:#f6f7f9;font-family:Arial,sans-serif;color:#171717;text-align:center;">
-  <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e7e8eb;border-radius:12px;padding:30px 36px;">
-    <h2 style="margin:0 0 20px;font-size:22px;border-bottom:1px solid #eeeeef;padding-bottom:20px;">Talksy</h2>
-    <h1 style="font-size:25px;margin:0 0 14px;">Log in verification</h1>
-    <div style="background:#f8f9fb;border:1px solid #e4e6ea;border-radius:10px;padding:24px;margin-bottom:30px;">
-      <div style="font-size:11px;font-weight:600;letter-spacing:1.5px;color:#858a92;margin-bottom:12px;">VERIFICATION CODE</div>
-      <div style="font-size:32px;font-weight:700;letter-spacing:7px;">$otp</div>
-    </div>
-    <p style="font-size:13px;color:#777c84;margin:0 0 30px;">This code will expire in <strong>10 minutes</strong>.</p>
-  </div>
-</body>
-</html>
-''';
-
-    try {
-      final response = await http.post(
-        Uri.parse('https://api.brevo.com/v3/smtp/email'),
-        headers: {
-          'accept': 'application/json',
-          'api-key': apiKey,
-          'content-type': 'application/json',
-        },
-        body: jsonEncode({
-          "sender": {"name": "Talksy", "email": mailFrom},
-          "to": [
-            {"email": email},
-          ],
-          "subject": "Your Talksy login code",
-          "htmlContent": htmlContent,
-        }),
-      );
-      if (response.statusCode >= 200 && response.statusCode < 300) return null;
-      return 'Error sending verification code.';
-    } catch (_) {
-      return 'Network connection error.';
-    }
-  }
-
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.redAccent),
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
   Future<void> _onAuthenticate() async {
     FocusScope.of(context).unfocus();
-    final email = _emailCtrl.text.trim();
-    final pass = _passCtrl.text;
+    final email = _emailCtrl.text.trim().toLowerCase();
+    final password = _passCtrl.text;
+
+    if (!_emailPattern.hasMatch(email)) {
+      _showSnack('Please enter a valid email address.');
+      return;
+    }
 
     setState(() => _isAuthenticating = true);
 
     try {
-      await Supabase.instance.client.rpc(
-        'check_login_rate_limit',
-        params: {'p_email': email},
-      );
-
-      final res = await Supabase.instance.client.auth.signInWithPassword(
-        email: email,
-        password: pass,
-      );
-
-      if (res.user != null) {
-        await Supabase.instance.client.rpc(
-          'reset_login_failures',
-          params: {'p_email': email},
-        );
-
-        final status = await Supabase.instance.client.rpc(
-          'get_otp_status',
-          params: {'p_email': email},
-        );
-
-        if (status != null && status['exists'] == true) {
-          await _syncBackendStatus(
-            email,
-            uid: res.user!.id,
-            autoOpenBottomSheet: true,
-          );
-        } else {
-          final otp = List<int>.generate(
-            6,
-            (_) => Random.secure().nextInt(10),
-          ).join();
-          final error = await _sendEmailOtp(email, otp);
-
-          if (error == null) {
-            await Supabase.instance.client.rpc(
-              'store_otp',
-              params: {'p_email': email, 'p_otp': otp},
-            );
-            await _syncBackendStatus(
-              email,
-              uid: res.user!.id,
-              autoOpenBottomSheet: true,
-            );
-          } else {
-            _showSnack(error);
-          }
-        }
-      }
-    } catch (e) {
-      try {
-        await Supabase.instance.client.rpc(
-          'record_login_failure',
-          params: {'p_email': email},
-        );
-      } catch (_) {}
-
-      final errStr = e.toString();
-      if (errStr.contains('Too many failed login attempts')) {
-        _showSnack(
-          'Too many failed login attempts. Please try again after 15 minutes.',
-        );
-      } else {
-        _showSnack('Invalid email or password');
-      }
+      await _db.auth.signInWithPassword(email: email, password: password);
+      await _db.auth.signOut(scope: SignOutScope.local);
+      if (!mounted) return;
+      _openCodeSheet(email, password);
+    } on AuthApiException catch (e) {
+      final wrongLogin =
+          e.code == 'invalid_credentials' ||
+          e.message.contains('Invalid login');
+      _showSnack(wrongLogin ? 'Invalid email or password.' : e.message);
+    } catch (_) {
+      _showSnack('Network error. Please try again.');
     } finally {
       if (mounted) setState(() => _isAuthenticating = false);
     }
   }
 
-  Future<void> _onOtpVerified(NavigatorState nav) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('otp_verified_$_activeUserId', true);
-
-    final user = Supabase.instance.client.auth.currentUser;
-    if (_rememberPassword && _passCtrl.text.isNotEmpty && user != null) {
-      await SavedAccountStore.save(user: user, password: _passCtrl.text);
-    }
-
-    await _clearPendingSession();
-    if (!mounted) return;
-
-    nav.pushAndRemoveUntil(
-      CupertinoPageRoute(
-        builder: (_) => const HomeScreen(showSuccessPopup: false),
-      ),
-      (route) => false,
-    );
-  }
-
-  void _openOtpBottomSheet() {
-    if (_activeEmail == null || _activeUserId == null || _expiresAt == null) {
-      return;
-    }
-
-    if (DateTime.now().isAfter(_expiresAt!)) {
-      _clearPendingSession();
-      return;
-    }
-
+  void _openCodeSheet(String email, String password) {
     final nav = Navigator.of(context);
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => Padding(
+      builder: (sheetContext) => Padding(
         padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
+          bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
         ),
         child: _OtpBottomSheetWidget(
-          email: _activeEmail!,
-          userId: _activeUserId!,
-          expiresAt: _expiresAt!,
-          onMinimize: () => Navigator.pop(context),
-          onVerifySuccess: () => _onOtpVerified(nav),
+          email: email,
+          onCancel: () => Navigator.pop(sheetContext),
+          onVerified: () {
+            Navigator.pop(sheetContext);
+            _signInWithPassword(nav, email, password);
+          },
         ),
       ),
-    ).then((_) {
-      final stillValid =
-          mounted &&
-          _activeEmail != null &&
-          _expiresAt != null &&
-          DateTime.now().isBefore(_expiresAt!);
-      if (!stillValid) _clearPendingSession();
-    });
+    );
+  }
+
+  Future<void> _signInWithPassword(
+    NavigatorState nav,
+    String email,
+    String password,
+  ) async {
+    setState(() => _isAuthenticating = true);
+
+    try {
+      final res = await _db.auth.signInWithPassword(
+        email: email,
+        password: password,
+      );
+      final user = res.user;
+      if (user == null) throw const AuthException('No user returned');
+
+      if (_rememberPassword) {
+        await SavedAccountStore.save(user: user, password: password);
+      }
+      await _enterHome(nav, user.id);
+    } catch (_) {
+      _showSnack('Sign in failed. Please generate a new code and try again.');
+    } finally {
+      if (mounted) setState(() => _isAuthenticating = false);
+    }
+  }
+
+  Future<void> _onGoogleSignIn() async {
+    if (_busy) return;
+    FocusScope.of(context).unfocus();
+    final nav = Navigator.of(context);
+    setState(() => _isGoogleLoading = true);
+
+    try {
+      final user = await _GoogleAuth.signIn();
+      await SavedAccountStore.save(user: user);
+      await _enterHome(nav, user.id);
+    } catch (e) {
+      await _GoogleAuth.signOut();
+      final message = _GoogleAuth.messageFor(
+        e,
+        fallback: 'Sign in failed. Please try again.',
+      );
+      if (message != null) _showSnack(message);
+    } finally {
+      if (mounted) setState(() => _isGoogleLoading = false);
+    }
   }
 
   @override
@@ -347,10 +252,11 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
     final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
-    final canSubmit = _isButtonEnabled && !_isAuthenticating;
+    final canSubmit = _isButtonEnabled && !_busy;
     final primary = AppTheme.primary;
     final textColor = isDark ? Colors.white : Colors.black87;
-    final hasActiveVerification = _activeEmail != null;
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+    final lineColor = isDark ? Colors.grey.shade800 : Colors.grey.shade300;
     final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
 
     return Scaffold(
@@ -396,16 +302,6 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
           'Log In',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
-        actions: [
-          if (hasActiveVerification)
-            IconButton(
-              icon: Icon(
-                Icons.mark_email_unread_outlined,
-                color: isDark ? Colors.white : Colors.black,
-              ),
-              onPressed: _openOtpBottomSheet,
-            ),
-        ],
       ),
       body: SafeArea(
         child: Stack(
@@ -513,76 +409,102 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 1),
+                          const SizedBox(height: 2),
                           Padding(
                             padding: const EdgeInsets.only(left: 32),
                             child: Text(
                               'When you check this option, your account will be saved on talksy and you don\'t need to enter password and verify code again to re-login.',
-                              style: TextStyle(
-                                fontSize: 8,
-                                color: isDark
-                                    ? Colors.grey.shade400
-                                    : Colors.grey.shade600,
-                              ),
+                              style: TextStyle(fontSize: 11, color: mutedColor),
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 14),
                       SizedBox(
                         width: double.infinity,
                         height: 48,
-                        child: hasActiveVerification
-                            ? OutlinedButton.icon(
-                                onPressed: _openOtpBottomSheet,
-                                icon: const Icon(
-                                  Icons.mark_email_unread_rounded,
-                                ),
-                                label: const Text(
-                                  'Resume Verification',
+                        child: ElevatedButton(
+                          onPressed: canSubmit ? _onAuthenticate : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: canSubmit ? primary : disabledBg,
+                            foregroundColor: canSubmit
+                                ? Colors.white
+                                : disabledFg,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          child: _isAuthenticating
+                              ? SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    color: disabledFg,
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Text(
+                                  'Authenticate',
                                   style: TextStyle(
                                     fontSize: 16,
                                     fontWeight: FontWeight.bold,
                                   ),
                                 ),
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: primary,
-                                  side: BorderSide(color: primary, width: 1.5),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                ),
-                              )
-                            : ElevatedButton(
-                                onPressed: canSubmit ? _onAuthenticate : null,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: canSubmit
-                                      ? primary
-                                      : disabledBg,
-                                  foregroundColor: canSubmit
-                                      ? Colors.white
-                                      : disabledFg,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                ),
-                                child: _isAuthenticating
-                                    ? SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          color: disabledFg,
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Text(
-                                        'Authenticate',
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.bold,
-                                        ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(child: Divider(color: lineColor)),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            child: Text(
+                              'Or',
+                              style: TextStyle(fontSize: 14, color: mutedColor),
+                            ),
+                          ),
+                          Expanded(child: Divider(color: lineColor)),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: OutlinedButton(
+                          onPressed: _busy ? null : _onGoogleSignIn,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: textColor,
+                            side: BorderSide(color: lineColor, width: 1.2),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _isGoogleLoading
+                                  ? SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.2,
+                                        color: primary,
                                       ),
+                                    )
+                                  : const GoogleLogo(size: 20),
+                              const SizedBox(width: 12),
+                              Text(
+                                _isGoogleLoading
+                                    ? 'Signing in...'
+                                    : 'Sign in with Google',
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
+                            ],
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -616,6 +538,72 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+class GoogleLogo extends StatelessWidget {
+  const GoogleLogo({super.key, this.size = 24});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: const CustomPaint(painter: _GoogleLogoPainter()),
+    );
+  }
+}
+
+class _GoogleLogoPainter extends CustomPainter {
+  const _GoogleLogoPainter();
+
+  static const _blue = Color(0xFF4285F4);
+  static const _red = Color(0xFFEA4335);
+  static const _yellow = Color(0xFFFBBC05);
+  static const _green = Color(0xFF34A853);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = size.width * 0.2;
+    final center = size.center(Offset.zero);
+    final arcBounds = Rect.fromCircle(
+      center: center,
+      radius: (size.width - stroke) / 2,
+    );
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke;
+
+    void drawArc(Color color, double startDegrees, double sweepDegrees) {
+      paint.color = color;
+      canvas.drawArc(
+        arcBounds,
+        startDegrees * math.pi / 180,
+        sweepDegrees * math.pi / 180,
+        false,
+        paint,
+      );
+    }
+
+    drawArc(_red, -150, 105);
+    drawArc(_yellow, 150, 60);
+    drawArc(_green, 45, 105);
+    drawArc(_blue, 0, 45);
+
+    canvas.drawRect(
+      Rect.fromLTRB(
+        center.dx,
+        center.dy - stroke / 2,
+        size.width,
+        center.dy + stroke / 2,
+      ),
+      Paint()..color = _blue,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class SavedAccountStore {
@@ -680,23 +668,29 @@ class SavedAccountStore {
     return accounts;
   }
 
-  static Future<void> save({
-    required User user,
-    required String password,
-  }) async {
+  static Future<void> save({required User user, String? password}) async {
     try {
-      final meta = user.userMetadata ?? {};
-      final avatarUrl = (meta['profile_image'] ?? meta['avatar_url'] ?? '')
-          .toString();
-
       final accounts = await _read();
-      accounts.removeWhere(
-        (a) => a['id'] == user.id || a['email'] == user.email,
+      final hasPassword = accounts.any(
+        (a) => a['id'] == user.id && a['password'] != null,
       );
+      if (password == null && hasPassword) {
+        await touch(user.id);
+        return;
+      }
+
+      final meta = user.userMetadata ?? {};
+      final email = (user.email ?? '').toLowerCase();
+      final avatarUrl =
+          (meta['profile_image'] ?? meta['avatar_url'] ?? meta['picture'] ?? '')
+              .toString();
+
+      accounts.removeWhere((a) => a['id'] == user.id || a['email'] == email);
       accounts.add({
         'id': user.id,
-        'email': user.email ?? '',
-        'password': password,
+        'email': email,
+        'provider': password == null ? 'google' : 'password',
+        'password': ?password,
         'first_name': (meta['first_name'] ?? meta['name'] ?? 'User').toString(),
         'last_name': (meta['last_name'] ?? '').toString(),
         'avatar_url': avatarUrl,
@@ -796,6 +790,17 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     );
   }
 
+  Future<User?> _authenticate(Map<String, dynamic> account) async {
+    if (account['provider'] == 'google') {
+      return _GoogleAuth.signIn(expectedEmail: account['email']);
+    }
+    final res = await _db.auth.signInWithPassword(
+      email: account['email'],
+      password: account['password'],
+    );
+    return res.user;
+  }
+
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
     final nav = Navigator.of(context);
 
@@ -811,34 +816,19 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     );
 
     try {
-      final res = await Supabase.instance.client.auth.signInWithPassword(
-        email: account['email'],
-        password: account['password'],
-      );
+      final user = await _authenticate(account);
+      if (user == null) throw const AuthException('No user returned');
 
-      if (res.user == null) {
-        nav.pop();
-        if (mounted) _showError('Failed to login. Please try again.');
-        return;
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('otp_verified_${res.user!.id}', true);
       await SavedAccountStore.touch(account['id']);
-
-      nav.pushAndRemoveUntil(
-        CupertinoPageRoute(
-          builder: (_) => const HomeScreen(showSuccessPopup: false),
-        ),
-        (route) => false,
-      );
-    } catch (_) {
+      await _enterHome(nav, user.id);
+    } catch (e) {
       nav.pop();
-      if (mounted) {
-        _showError(
-          'Saved credentials expired or invalid. Please login manually.',
-        );
-      }
+      final message = _GoogleAuth.messageFor(
+        e,
+        fallback:
+            'Saved credentials expired or invalid. Please login manually.',
+      );
+      if (message != null && mounted) _showError(message);
     }
   }
 
@@ -924,8 +914,8 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                       : fullName;
                   final localAvatarPath = acc['local_avatar_path'] ?? '';
                   final avatarUrl = acc['avatar_url'] ?? '';
-                  final lastLoginStr = acc['last_login'];
-                  final timeAgo = _getTimeAgo(lastLoginStr);
+                  final timeAgo = _getTimeAgo(acc['last_login']);
+                  final viaGoogle = acc['provider'] == 'google';
 
                   Widget avatarWidget;
                   if (localAvatarPath.isNotEmpty &&
@@ -993,7 +983,9 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    'Last login: $timeAgo',
+                                    viaGoogle
+                                        ? 'Last login: $timeAgo  •  Google'
+                                        : 'Last login: $timeAgo',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: isDark
@@ -1028,17 +1020,13 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
 
 class _OtpBottomSheetWidget extends StatefulWidget {
   final String email;
-  final String userId;
-  final DateTime expiresAt;
-  final VoidCallback onMinimize;
-  final VoidCallback onVerifySuccess;
+  final VoidCallback onCancel;
+  final VoidCallback onVerified;
 
   const _OtpBottomSheetWidget({
     required this.email,
-    required this.userId,
-    required this.expiresAt,
-    required this.onMinimize,
-    required this.onVerifySuccess,
+    required this.onCancel,
+    required this.onVerified,
   });
 
   @override
@@ -1069,9 +1057,9 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
     }
   }
 
-  Future<void> _verifyOtp() async {
-    final token = _otpCtrl.text.trim();
-    if (token.length != 6) {
+  Future<void> _verifyCode() async {
+    final code = _otpCtrl.text.trim();
+    if (code.length != 6) {
       setState(() => _errorMessage = 'Please enter a valid 6-digit code.');
       return;
     }
@@ -1082,20 +1070,20 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
     });
 
     try {
-      final isValid = await Supabase.instance.client.rpc(
-        'verify_otp',
-        params: {'p_email': widget.email, 'p_otp': token},
+      final isValid = await _db.rpc(
+        'verify_code_for_email',
+        params: {'p_email': widget.email, 'p_code': code},
       );
 
       if (isValid == true) {
-        widget.onVerifySuccess();
-      } else {
-        if (!mounted) return;
-        setState(() {
-          _isVerifying = false;
-          _errorMessage = 'Incorrect or invalid verification code.';
-        });
+        widget.onVerified();
+        return;
       }
+      if (!mounted) return;
+      setState(() {
+        _isVerifying = false;
+        _errorMessage = 'Incorrect or expired code.';
+      });
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -1109,6 +1097,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final primary = AppTheme.primary;
+    final borderColor = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
 
     return Container(
       decoration: BoxDecoration(
@@ -1132,7 +1121,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                 width: 28,
                 height: 3.5,
                 decoration: BoxDecoration(
-                  color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
+                  color: borderColor,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -1162,7 +1151,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Enter 6-digit code which has been sent to email: ${widget.email}',
+                  'Open Talksy Authenticator with ${widget.email} and enter the 6-digit code shown there.',
                   style: TextStyle(
                     fontSize: 14,
                     color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
@@ -1172,7 +1161,9 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
               const SizedBox(height: 18),
               TextField(
                 controller: _otpCtrl,
+                autofocus: true,
                 keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                 textAlign: TextAlign.center,
                 maxLength: 6,
                 style: TextStyle(
@@ -1198,12 +1189,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide(
-                      color: isDark
-                          ? Colors.grey.shade700
-                          : Colors.grey.shade300,
-                      width: 1,
-                    ),
+                    borderSide: BorderSide(color: borderColor, width: 1),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
@@ -1211,12 +1197,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                   ),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide(
-                      color: isDark
-                          ? Colors.grey.shade700
-                          : Colors.grey.shade300,
-                      width: 1,
-                    ),
+                    borderSide: BorderSide(color: borderColor, width: 1),
                   ),
                 ),
               ),
@@ -1248,7 +1229,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   TextButton(
-                    onPressed: _isVerifying ? null : widget.onMinimize,
+                    onPressed: _isVerifying ? null : widget.onCancel,
                     style: TextButton.styleFrom(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 4,
@@ -1258,7 +1239,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     child: const Text(
-                      'Minimize',
+                      'Cancel',
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -1273,7 +1254,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
                 width: double.infinity,
                 height: 45,
                 child: ElevatedButton(
-                  onPressed: _isVerifying ? null : _verifyOtp,
+                  onPressed: _isVerifying ? null : _verifyCode,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: primary,
                     foregroundColor: Colors.white,
