@@ -218,7 +218,7 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
             child: Container(height: 0.5, color: borderColor),
           ),
           title: Text(
-            'Search user to connect',
+            'Search users to connect',
             style: TextStyle(
               fontSize: 17,
               fontWeight: FontWeight.normal,

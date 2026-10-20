@@ -1151,7 +1151,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Open Talksy Authenticator with ${widget.email} and enter the 6-digit code shown there.',
+                  'Log in to the Talksy authenticator app with ${widget.email} and enter the generated 6-digit code shown there within 60 seconds.',
                   style: TextStyle(
                     fontSize: 14,
                     color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
