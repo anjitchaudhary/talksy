@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:talksy/api_gateway.dart';
 
 import 'chatpreview.dart';
 import 'profile/profile.dart';
@@ -65,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final user = Supabase.instance.client.auth.currentUser;
+    final user = ApiGateway.instance.currentUser;
     final profileUrl =
         user?.userMetadata?['profile_image'] as String? ??
         user?.userMetadata?['avatar_url'] as String?;

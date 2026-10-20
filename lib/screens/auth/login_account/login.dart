@@ -11,11 +11,12 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:talksy/api_gateway.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 
 import 'home/home.dart';
 
-SupabaseClient get _db => Supabase.instance.client;
+ApiGateway get _api => ApiGateway.instance;
 
 final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
@@ -53,7 +54,7 @@ class _GoogleAuth {
       throw _GoogleLoginException('Please sign in with $expectedEmail.');
     }
 
-    final registered = await _db.rpc(
+    final registered = await _api.rpc(
       'check_email_exists',
       params: {'email_input': email},
     );
@@ -67,15 +68,7 @@ class _GoogleAuth {
       throw const AuthException('Missing Google ID token');
     }
 
-    final res = await _db.auth.signInWithIdToken(
-      provider: OAuthProvider.google,
-      idToken: idToken,
-    );
-    final user = res.user;
-    if (user == null) {
-      throw const AuthException('No user returned');
-    }
-    return user;
+    return _api.signInWithGoogle(idToken);
   }
 
   static String? messageFor(Object error, {required String fallback}) {
@@ -159,8 +152,8 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isAuthenticating = true);
 
     try {
-      await _db.auth.signInWithPassword(email: email, password: password);
-      await _db.auth.signOut(scope: SignOutScope.local);
+      await _api.signIn(email, password);
+      await _api.signOutLocal();
       if (!mounted) return;
       _openCodeSheet(email, password);
     } on AuthApiException catch (e) {
@@ -206,12 +199,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isAuthenticating = true);
 
     try {
-      final res = await _db.auth.signInWithPassword(
-        email: email,
-        password: password,
-      );
-      final user = res.user;
-      if (user == null) throw const AuthException('No user returned');
+      final user = await _api.signIn(email, password);
 
       if (_rememberPassword) {
         await SavedAccountStore.save(user: user, password: password);
@@ -794,11 +782,7 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     if (account['provider'] == 'google') {
       return _GoogleAuth.signIn(expectedEmail: account['email']);
     }
-    final res = await _db.auth.signInWithPassword(
-      email: account['email'],
-      password: account['password'],
-    );
-    return res.user;
+    return _api.signIn(account['email'], account['password']);
   }
 
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
@@ -1070,7 +1054,7 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
     });
 
     try {
-      final isValid = await _db.rpc(
+      final isValid = await _api.rpc(
         'verify_code_for_email',
         params: {'p_email': widget.email, 'p_code': code},
       );

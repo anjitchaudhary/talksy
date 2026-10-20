@@ -5,7 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:talksy/api_gateway.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 import 'package:talksy/screens/auth/login_account/home/home.dart';
 import 'package:talksy/screens/auth/login_account/login.dart'
@@ -58,43 +58,11 @@ class ShowDetailScreen extends StatefulWidget {
 }
 
 class _ShowDetailScreenState extends State<ShowDetailScreen> {
-  static String? _activeSessionEmail;
+  final ApiGateway _api = ApiGateway.instance;
 
-  final SupabaseClient _db = Supabase.instance.client;
-  final TextEditingController _otpController = TextEditingController();
-
-  bool _isOtpSent = false;
   bool _isLoading = false;
-  DateTime? _otpExpiry;
 
-  @override
-  void initState() {
-    super.initState();
-    if (_activeSessionEmail == widget.email.trim()) {
-      _isOtpSent = true;
-      _checkExistingOtp();
-    }
-  }
-
-  @override
-  void dispose() {
-    _otpController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _checkExistingOtp() async {
-    try {
-      final res = await _db.rpc(
-        'get_otp_status',
-        params: {'p_email': widget.email.trim()},
-      );
-      if (res != null && res['exists'] == true && mounted) {
-        setState(() {
-          _otpExpiry = DateTime.parse(res['expires_at']).toLocal();
-        });
-      }
-    } catch (_) {}
-  }
+  String get _email => widget.email.trim().toLowerCase();
 
   Future<String?> _uploadProfileImage() async {
     final file = widget.profileImage;
@@ -102,93 +70,63 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
 
     try {
       final bytes = await file.readAsBytes();
-      final res = await _db.functions.invoke(
-        'bright-function',
-        body: {'image_base64': 'data:image/jpeg;base64,${base64Encode(bytes)}'},
+      return await _api.uploadImage(
+        'data:image/jpeg;base64,${base64Encode(bytes)}',
       );
-      final data = res.data;
-      return data is Map ? data['url'] as String? : null;
     } catch (_) {
       return null;
     }
   }
 
-  Future<void> _handleSendCode() async {
-    if (_isLoading) return;
-    setState(() => _isLoading = true);
-
-    try {
-      await _db.functions.invoke('Otp', body: {'email': widget.email.trim()});
-
-      _activeSessionEmail = widget.email.trim();
-      if (!mounted) return;
-      setState(() => _isOtpSent = true);
-      _checkExistingOtp();
-      _showSnack('Verification code sent successfully.');
-    } on FunctionException catch (e) {
-      _showSnack(
-        e.status == 429
-            ? 'Please wait a moment before requesting another code.'
-            : 'Could not send the code. Please try again.',
-      );
-    } catch (_) {
-      _showSnack('Failed to process verification request.');
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
   Future<void> _verifyAndCreateAccount() async {
     if (_isLoading) return;
-
-    final token = _otpController.text.trim();
-    if (token.length != 6) return _showSnack('Enter a valid 6-digit code.');
-    if (_otpExpiry != null && DateTime.now().isAfter(_otpExpiry!)) {
-      return _showSnack('Code has expired.');
-    }
-
     setState(() => _isLoading = true);
-    var otpUsed = false;
 
     try {
-      final isValid = await _db.rpc(
-        'verify_otp',
-        params: {'p_email': widget.email.trim(), 'p_otp': token},
-      );
-
-      if (isValid != true) {
-        _showSnack('Invalid verification code.');
-        if (mounted) setState(() => _isLoading = false);
+      if (await _api.isEmailRegistered(_email)) {
+        _showSnack('This email is already registered. Please log in.');
         return;
       }
 
-      _activeSessionEmail = null;
-      otpUsed = true;
+      final google = await _api.pickGoogleAccount();
+      if (google == null) return;
+
+      if (google.email.trim().toLowerCase() != _email) {
+        await _api.releaseGoogleAccount();
+        _showSnack('Choose the Google account that uses $_email.');
+        return;
+      }
+
+      try {
+        await _api.createAccount(
+          idToken: google.idToken,
+          email: _email,
+          password: widget.password,
+          firstName: widget.firstName,
+          lastName: widget.lastName,
+          dob: widget.dob,
+          gender: widget.gender,
+        );
+      } on GatewayException catch (e) {
+        if (e.status != 409) rethrow;
+      }
+
+      final user = await _api.signIn(_email, widget.password);
+
+      try {
+        await _api.linkGoogle(google.idToken);
+      } catch (_) {}
 
       final imageUrl = await _uploadProfileImage();
-      final fullName = '${widget.firstName.trim()} ${widget.lastName.trim()}';
-
-      final res = await _db.auth.signUp(
-        email: widget.email.trim(),
-        password: widget.password,
-        data: {
-          'first_name': widget.firstName.trim(),
-          'last_name': widget.lastName.trim(),
-          'display_name': fullName,
-          'full_name': fullName,
-          'dob': widget.dob.toIso8601String(),
-          'gender': widget.gender,
-          'profile_image': imageUrl,
-          'avatar_url': imageUrl,
-        },
-      );
-
-      final user = res.user;
-      if (user == null) throw Exception('Signup failed');
+      if (imageUrl != null) await _api.saveAvatar(imageUrl);
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('otp_verified_${user.id}', true);
-      await SavedAccountStore.save(user: user, password: widget.password);
+      await SavedAccountStore.save(
+        user: _api.currentUser ?? user,
+        password: widget.password,
+      );
+      await _api.releaseGoogleAccount();
 
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
@@ -197,14 +135,29 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
         ),
         (route) => false,
       );
+    } on GatewayException catch (e) {
+      _showSnack(_messageFor(e));
     } catch (_) {
-      _showSnack('Error occurred during account creation.');
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-        if (otpUsed) _isOtpSent = false;
-      });
-      if (otpUsed) _otpController.clear();
+      _showSnack('Something went wrong. Please try again.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  String _messageFor(GatewayException e) {
+    switch (e.code) {
+      case 'email_mismatch':
+        return 'Choose the Google account that uses $_email.';
+      case 'invalid_google_token':
+        return 'Google verification failed. Please try again.';
+      case 'email_exists':
+        return 'This email is already registered. Please log in.';
+      case 'invalid_details':
+        return 'Some of your details are invalid. Please go back and check.';
+      case 'signin_failed':
+        return 'This email is already registered. Please log in.';
+      default:
+        return 'Could not create your account. Please try again.';
     }
   }
 
@@ -219,22 +172,24 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       children: [
         Icon(icon, size: 28, color: Colors.grey),
         const SizedBox(width: 16),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              label,
-              style: const TextStyle(fontSize: 14, color: Colors.grey),
-            ),
-            Text(
-              value,
-              style: TextStyle(
-                fontSize: 16,
-                color: color,
-                fontWeight: FontWeight.w500,
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(fontSize: 14, color: Colors.grey),
               ),
-            ),
-          ],
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 16,
+                  color: color,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -289,7 +244,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
               _detailRow(
                 Icons.lock_outline,
                 'Password',
-                '•' * widget.password.length,
+                widget.password,
                 textColor,
               ),
             ],
@@ -305,9 +260,6 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     final cardColor = Theme.of(context).cardColor;
     final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
     final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
-
-    final isVerifyEnabled =
-        !_isLoading && _otpController.text.trim().length == 6;
 
     return Scaffold(
       appBar: AppBar(
@@ -381,89 +333,36 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
                 ],
               ),
               const SizedBox(height: 30),
-              if (!_isOtpSent) ...[
-                const Text(
-                  'Verify your email address to complete your registration.',
-                  style: TextStyle(fontSize: 15),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    onPressed: _isLoading ? null : _handleSendCode,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isLoading
-                          ? disabledBg
-                          : AppTheme.primary,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
+              Text(
+                'Verify your email with Google to complete your registration. '
+                'Choose the Google account that uses ${widget.email.trim()}.',
+                style: const TextStyle(fontSize: 15, height: 1.4),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _isLoading ? null : _verifyAndCreateAccount,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isLoading ? disabledBg : AppTheme.primary,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
                     ),
-                    child: _isLoading
-                        ? SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              color: disabledFg,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Text('Send Verification Code'),
                   ),
+                  child: _isLoading
+                      ? SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            color: disabledFg,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text('Verify with Google Account'),
                 ),
-              ] else ...[
-                const Text(
-                  'Enter Verification Code',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _otpController,
-                  keyboardType: TextInputType.number,
-                  textAlign: TextAlign.center,
-                  maxLength: 6,
-                  style: const TextStyle(fontSize: 20, letterSpacing: 8),
-                  decoration: InputDecoration(
-                    hintText: '000000',
-                    counterText: '',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    filled: true,
-                    fillColor: cardColor,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    onPressed: isVerifyEnabled ? _verifyAndCreateAccount : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isVerifyEnabled
-                          ? AppTheme.primary
-                          : disabledBg,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                    child: _isLoading
-                        ? SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              color: disabledFg,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Text('Verify & Create Account'),
-                  ),
-                ),
-              ],
+              ),
             ],
           ),
         ),

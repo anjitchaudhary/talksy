@@ -7,6 +7,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
+import 'api_gateway.dart';
 import 'screens/splashscreen.dart';
 
 Future<void> main() async {
@@ -72,7 +73,7 @@ class PresenceService {
 
   static final PresenceService instance = PresenceService._();
 
-  final SupabaseClient _db = Supabase.instance.client;
+  final ApiGateway _db = ApiGateway.instance;
 
   final ValueNotifier<Set<String>> onlineIds = ValueNotifier<Set<String>>({});
   final ValueNotifier<bool> connected = ValueNotifier<bool>(true);
@@ -84,7 +85,7 @@ class PresenceService {
   bool _joined = false;
 
   void start() {
-    final user = _db.auth.currentUser;
+    final user = _db.currentUser;
     if (user == null || _uid == user.id) return;
     if (_uid != null) unawaited(stop());
 
@@ -206,7 +207,6 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
-  final SupabaseClient _supabase = Supabase.instance.client;
   StreamSubscription<AuthState>? _authSub;
 
   @override
@@ -214,7 +214,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     PresenceService.instance.start();
-    _authSub = _supabase.auth.onAuthStateChange.listen((data) {
+    _authSub = ApiGateway.instance.authChanges.listen((data) {
       if (data.session != null) {
         PresenceService.instance.start();
       } else {

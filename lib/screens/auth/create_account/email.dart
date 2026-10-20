@@ -250,7 +250,7 @@ class _EmailScreenState extends State<EmailScreen> {
               const SizedBox(height: 10),
 
               const Text(
-                'Enter the email address where you can be reached. It must be a working email.',
+                'Enter the email address where you can be reached. It must be a working email. Once you use this email, you can\'t change it later.',
                 style: TextStyle(fontSize: 16, color: Colors.grey),
               ),
 
