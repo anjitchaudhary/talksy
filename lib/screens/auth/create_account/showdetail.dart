@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -61,6 +62,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
   final ApiGateway _api = ApiGateway.instance;
 
   bool _isLoading = false;
+  bool _isDone = false;
 
   String get _email => widget.email.trim().toLowerCase();
 
@@ -82,6 +84,8 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     if (_isLoading) return;
     setState(() => _isLoading = true);
 
+    var completed = false;
+
     try {
       if (await _api.isEmailRegistered(_email)) {
         _showSnack('This email is already registered. Please log in.');
@@ -92,7 +96,6 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       if (google == null) return;
 
       if (google.email.trim().toLowerCase() != _email) {
-        await _api.releaseGoogleAccount();
         _showSnack('Choose the Google account that uses $_email.');
         return;
       }
@@ -128,6 +131,11 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       );
       await _api.releaseGoogleAccount();
 
+      completed = true;
+      if (!mounted) return;
+      setState(() => _isDone = true);
+      await Future.delayed(const Duration(milliseconds: 700));
+
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
         CupertinoPageRoute(
@@ -137,10 +145,15 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       );
     } on GatewayException catch (e) {
       _showSnack(_messageFor(e));
+    } on TimeoutException {
+      _showSnack('Connection timed out. Please check your internet.');
     } catch (_) {
       _showSnack('Something went wrong. Please try again.');
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (!completed) {
+        await _api.releaseGoogleAccount();
+        if (mounted) setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -151,11 +164,10 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       case 'invalid_google_token':
         return 'Google verification failed. Please try again.';
       case 'email_exists':
+      case 'signin_failed':
         return 'This email is already registered. Please log in.';
       case 'invalid_details':
         return 'Some of your details are invalid. Please go back and check.';
-      case 'signin_failed':
-        return 'This email is already registered. Please log in.';
       default:
         return 'Could not create your account. Please try again.';
     }
@@ -164,7 +176,8 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _detailRow(IconData icon, String label, String value, Color color) {
@@ -244,7 +257,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
               _detailRow(
                 Icons.lock_outline,
                 'Password',
-                widget.password,
+                '•' * widget.password.length,
                 textColor,
               ),
             ],
@@ -254,116 +267,202 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     );
   }
 
+  Widget _profileCard(Color cardColor) {
+    return Row(
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: const Color(0xFFC0C0C0), width: 1.5),
+          ),
+          child: CircleAvatar(
+            radius: 28,
+            backgroundColor: Colors.transparent,
+            backgroundImage: widget.profileImage != null
+                ? FileImage(widget.profileImage!)
+                : null,
+            child: widget.profileImage == null
+                ? Icon(Icons.person, size: 25, color: Colors.grey.shade500)
+                : null,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: cardColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.shade300),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${widget.firstName} ${widget.lastName}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(widget.email, style: const TextStyle(color: Colors.grey)),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buttonRow(Key key, Widget leading, String text) {
+    return Row(
+      key: key,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        leading,
+        const SizedBox(width: 12),
+        Text(
+          text,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+      ],
+    );
+  }
+
+  Widget _buttonContent() {
+    if (_isDone) {
+      return _buttonRow(
+        const ValueKey('done'),
+        const Icon(Icons.check_circle_rounded, size: 24),
+        'Verified',
+      );
+    }
+    if (_isLoading) {
+      return _buttonRow(
+        const ValueKey('loading'),
+        const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            color: Colors.white,
+            strokeWidth: 2.5,
+          ),
+        ),
+        'Verifying...',
+      );
+    }
+    return _buttonRow(
+      const ValueKey('idle'),
+      const _GoogleMark(),
+      'Verify with Google',
+    );
+  }
+
+  Widget _verifyButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 50,
+      child: ElevatedButton(
+        onPressed: _isLoading ? null : _verifyAndCreateAccount,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppTheme.primary,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: AppTheme.primary,
+          disabledForegroundColor: Colors.white,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(scale: animation, child: child),
+          ),
+          child: _buttonContent(),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final background = Theme.of(context).scaffoldBackgroundColor;
     final cardColor = Theme.of(context).cardColor;
-    final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
-    final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
 
-    return Scaffold(
-      appBar: AppBar(
-        elevation: 0,
-        toolbarHeight: 40,
-        leading: const BackButton(),
-        titleSpacing: 0,
-        title: const Text('Review & Verify'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.more_vert),
-            onPressed: _showDetailPopup,
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: const Color(0xFFC0C0C0),
-                        width: 1.5,
-                      ),
-                    ),
-                    child: CircleAvatar(
-                      radius: 28,
-                      backgroundColor: Colors.transparent,
-                      backgroundImage: widget.profileImage != null
-                          ? FileImage(widget.profileImage!)
-                          : null,
-                      child: widget.profileImage == null
-                          ? Icon(
-                              Icons.person,
-                              size: 25,
-                              color: Colors.grey.shade500,
-                            )
-                          : null,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: cardColor,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey.shade300),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${widget.firstName} ${widget.lastName}',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            widget.email,
-                            style: const TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 30),
-              Text(
-                'Verify your email with Google to complete your registration. '
-                'Choose the Google account that uses ${widget.email.trim()}.',
-                style: const TextStyle(fontSize: 15, height: 1.4),
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _verifyAndCreateAccount,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isLoading ? disabledBg : AppTheme.primary,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: _isLoading
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            color: disabledFg,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Text('Verify with Google Account'),
+    return PopScope(
+      canPop: !_isLoading,
+      child: Scaffold(
+        backgroundColor: background,
+        appBar: AppBar(
+          backgroundColor: background,
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
+          elevation: 0,
+          toolbarHeight: 40,
+          leading: const BackButton(),
+          titleSpacing: 0,
+          title: const Text('Review & Verify'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.more_vert),
+              onPressed: _isLoading ? null : _showDetailPopup,
+            ),
+          ],
+        ),
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _profileCard(cardColor),
+                const SizedBox(height: 30),
+                Text(
+                  'Verify your email with Google to complete your registration. '
+                  'Choose the Google account that uses ${widget.email.trim()}.',
+                  style: const TextStyle(fontSize: 15, height: 1.4),
                 ),
-              ),
-            ],
+                const SizedBox(height: 24),
+                _verifyButton(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GoogleMark extends StatelessWidget {
+  const _GoogleMark();
+
+  static const _colors = [
+    Color(0xFF4285F4),
+    Color(0xFF34A853),
+    Color(0xFFFBBC05),
+    Color(0xFFEA4335),
+    Color(0xFF4285F4),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 26,
+      height: 26,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+      ),
+      child: ShaderMask(
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (bounds) =>
+            const SweepGradient(colors: _colors).createShader(bounds),
+        child: const Text(
+          'G',
+          style: TextStyle(
+            fontSize: 17,
+            height: 1,
+            fontWeight: FontWeight.w800,
           ),
         ),
       ),

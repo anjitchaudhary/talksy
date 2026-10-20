@@ -55,7 +55,6 @@ class _CreatePasswordScreenState extends State<CreatePasswordScreen> {
 
   bool _isPasswordVisible = false;
   bool _isConfirmVisible = false;
-
   String _strength = "";
   Color _strengthColor = Colors.grey;
 
@@ -63,7 +62,18 @@ class _CreatePasswordScreenState extends State<CreatePasswordScreen> {
   void initState() {
     super.initState();
     _passwordController.addListener(_checkPasswordStrength);
-    _confirmPasswordController.addListener(() => setState(() {}));
+    _confirmPasswordController.addListener(_handleTextChange);
+  }
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  void _handleTextChange() {
+    setState(() {});
   }
 
   void _checkPasswordStrength() {
@@ -88,13 +98,14 @@ class _CreatePasswordScreenState extends State<CreatePasswordScreen> {
   bool _isFormValid() {
     final pass = _passwordController.text;
     final confirm = _confirmPasswordController.text;
-    return pass.isNotEmpty && pass == confirm && pass.length >= 6;
+    return pass.isNotEmpty &&
+        pass == confirm &&
+        pass.length >= 6 &&
+        _strength == "Strong";
   }
 
   void _onNextClicked() {
-    if (!_isFormValid()) {
-      return;
-    }
+    if (!_isFormValid()) return;
     Navigator.push(
       context,
       CupertinoPageRoute(
@@ -112,20 +123,12 @@ class _CreatePasswordScreenState extends State<CreatePasswordScreen> {
   }
 
   @override
-  void dispose() {
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final backgroundColor = Theme.of(context).scaffoldBackgroundColor;
     final cardColor = Theme.of(context).cardColor;
     final textColor =
         Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black;
     final isValid = _isFormValid();
-
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final disabledBg = isDark ? Colors.grey.shade700 : Colors.grey.shade300;
     final disabledFg = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
@@ -159,7 +162,7 @@ class _CreatePasswordScreenState extends State<CreatePasswordScreen> {
               ),
               const SizedBox(height: 10),
               Text(
-                "Create a strong password with at least 6 characters. It should be something others couldn't guess.",
+                "Create a strong password with at least 6 characters. It should be something others couldn't guess. Password strength must be strong.",
                 style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
               ),
               const SizedBox(height: 20),
