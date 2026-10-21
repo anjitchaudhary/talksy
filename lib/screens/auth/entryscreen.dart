@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart' show Icons;
 import 'package:talksy/main.dart';
 
 import 'create_account/createname.dart';
@@ -8,32 +9,32 @@ class AppTheme {
   static const primary = CupertinoColors.activeBlue;
 
   static const background = CupertinoDynamicColor.withBrightness(
-    color: Color(0xFFFDFDFD),
-    darkColor: Color(0xFF1C1C1E),
+    color: Color(0xFFF6F8FA),
+    darkColor: Color(0xFF0A0A0C),
   );
 
   static const backgroundEnd = CupertinoDynamicColor.withBrightness(
-    color: Color(0xFFF0F4F8),
+    color: Color(0xFFEAEEF3),
     darkColor: Color(0xFF000000),
+  );
+
+  static const surface = CupertinoDynamicColor.withBrightness(
+    color: CupertinoColors.white,
+    darkColor: Color(0xFF161618),
   );
 
   static const button = CupertinoDynamicColor.withBrightness(
     color: CupertinoColors.white,
-    darkColor: Color(0xFF2C2C2E),
+    darkColor: Color(0xFF1C1C1E),
   );
 
   static const border = CupertinoDynamicColor.withBrightness(
-    color: Color(0xFFD1D1D6),
-    darkColor: Color(0xFF5A5A60),
+    color: Color(0xFFE2E4E9),
+    darkColor: Color(0xFF2C2C2E),
   );
 
   static const title = CupertinoColors.label;
   static const subtitle = CupertinoColors.secondaryLabel;
-
-  static const silverBorder = CupertinoDynamicColor.withBrightness(
-    color: Color(0xFFC0C0C0),
-    darkColor: Color(0xFFA8A8AE),
-  );
 }
 
 class EntryScreen extends StatelessWidget {
@@ -57,16 +58,16 @@ class EntryScreen extends StatelessWidget {
         child: SafeArea(
           child: Padding(
             padding: EdgeInsets.symmetric(
-              horizontal: MediaQuery.sizeOf(context).width * .08,
+              horizontal: MediaQuery.sizeOf(context).width * .075,
             ),
             child: const Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                Spacer(flex: 2),
+                WelcomeCardHeader(),
                 Spacer(flex: 3),
-                WelcomeHeader(),
-                Spacer(flex: 4),
-                ActionButtons(),
-                Spacer(),
+                ActionButtonsContainer(),
+                Spacer(flex: 2),
               ],
             ),
           ),
@@ -76,59 +77,79 @@ class EntryScreen extends StatelessWidget {
   }
 }
 
-class WelcomeHeader extends StatelessWidget {
-  const WelcomeHeader({super.key});
+class WelcomeCardHeader extends StatelessWidget {
+  const WelcomeCardHeader({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: CupertinoDynamicColor.resolve(
-              AppTheme.primary,
-              context,
-            ).withValues(alpha: 0.1),
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: CupertinoDynamicColor.resolve(
-                AppTheme.silverBorder,
-                context,
+    final dark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 28),
+      decoration: BoxDecoration(
+        color: CupertinoDynamicColor.resolve(AppTheme.surface, context),
+        borderRadius: BorderRadius.circular(32),
+        border: Border.all(
+          color: CupertinoDynamicColor.resolve(AppTheme.border, context),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: CupertinoColors.black.withValues(alpha: dark ? 0.45 : 0.07),
+            blurRadius: 32,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(22),
+              color: dark ? const Color(0xFF222225) : const Color(0xFFF0F3F7),
+              border: Border.all(
+                color: CupertinoDynamicColor.resolve(AppTheme.border, context),
+                width: 1,
               ),
-              width: 1.8,
+            ),
+            child: Image.asset(
+              'assets/icon/icon.png',
+              width: 56,
+              height: 56,
+              fit: BoxFit.contain,
             ),
           ),
-          child: Image.asset(
-            'assets/icon/icon.png',
-            width: 64,
-            height: 64,
-            fit: BoxFit.contain,
+          const SizedBox(height: 26),
+          Text(
+            'Welcome Back',
+            textAlign: TextAlign.center,
+            style: AppTypography.welcomeTitle.copyWith(
+              color: CupertinoDynamicColor.resolve(AppTheme.title, context),
+              fontSize: 28,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.6,
+            ),
           ),
-        ),
-        const SizedBox(height: 32),
-        Text(
-          'Welcome Back',
-          textAlign: TextAlign.center,
-          style: AppTypography.welcomeTitle.copyWith(
-            color: CupertinoDynamicColor.resolve(AppTheme.title, context),
+          const SizedBox(height: 10),
+          Text(
+            'Sign in to continue your journey or create an account.',
+            textAlign: TextAlign.center,
+            style: AppTypography.welcomeSubtitle.copyWith(
+              color: CupertinoDynamicColor.resolve(AppTheme.subtitle, context),
+              fontSize: 14.5,
+              height: 1.4,
+            ),
           ),
-        ),
-        const SizedBox(height: 12),
-        Text(
-          'Sign in to continue your journey or create a new account to get started.',
-          textAlign: TextAlign.center,
-          style: AppTypography.welcomeSubtitle.copyWith(
-            color: CupertinoDynamicColor.resolve(AppTheme.subtitle, context),
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class ActionButtons extends StatelessWidget {
-  const ActionButtons({super.key});
+class ActionButtonsContainer extends StatelessWidget {
+  const ActionButtonsContainer({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -136,15 +157,18 @@ class ActionButtons extends StatelessWidget {
       children: [
         AppButton(
           text: 'Log In',
+          icon: Icons.login_rounded,
           primary: true,
           onPressed: () => Navigator.push(
             context,
             CupertinoPageRoute(builder: (_) => const LoginScreen()),
           ),
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 16),
         AppButton(
           text: 'Create Account',
+          icon: Icons.person_add_outlined,
+          primary: false,
           onPressed: () => Navigator.push(
             context,
             CupertinoPageRoute(builder: (_) => const CreateNameScreen()),
@@ -157,27 +181,27 @@ class ActionButtons extends StatelessWidget {
 
 class AppButton extends StatelessWidget {
   final String text;
+  final IconData icon;
   final bool primary;
   final VoidCallback onPressed;
 
   const AppButton({
     super.key,
     required this.text,
+    required this.icon,
     required this.onPressed,
     this.primary = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final dark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
-
     return SizedBox(
       width: double.infinity,
-      height: 52,
+      height: 54,
       child: CupertinoButton(
         padding: EdgeInsets.zero,
-        pressedOpacity: 0.7,
-        borderRadius: BorderRadius.circular(16),
+        pressedOpacity: 0.85,
+        borderRadius: BorderRadius.circular(18),
         color: primary
             ? AppTheme.primary
             : CupertinoDynamicColor.resolve(AppTheme.button, context),
@@ -185,22 +209,39 @@ class AppButton extends StatelessWidget {
         child: Container(
           alignment: Alignment.center,
           decoration: primary
-              ? null
+              ? BoxDecoration(borderRadius: BorderRadius.circular(18))
               : BoxDecoration(
                   border: Border.all(
-                    color: dark
-                        ? const Color(0xFF5A5A60)
-                        : const Color(0xFFD1D1D6),
+                    color: CupertinoDynamicColor.resolve(
+                      AppTheme.border,
+                      context,
+                    ),
+                    width: 1,
                   ),
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(18),
                 ),
-          child: Text(
-            text,
-            style: AppTypography.buttonLabel.copyWith(
-              color: primary
-                  ? CupertinoColors.white
-                  : CupertinoDynamicColor.resolve(AppTheme.title, context),
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: primary
+                    ? CupertinoColors.white
+                    : CupertinoDynamicColor.resolve(AppTheme.title, context),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                text,
+                style: AppTypography.buttonLabel.copyWith(
+                  color: primary
+                      ? CupertinoColors.white
+                      : CupertinoDynamicColor.resolve(AppTheme.title, context),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
           ),
         ),
       ),

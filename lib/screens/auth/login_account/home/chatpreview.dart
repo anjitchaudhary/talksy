@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../api_gateway.dart';
 import '../../../../main.dart';
 import 'chat.dart';
 import 'profile/another_user.dart';
@@ -148,7 +149,7 @@ class ChatPreviewScreen extends StatefulWidget {
 }
 
 class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
-  final _db = Supabase.instance.client;
+  final _gateway = ApiGateway.instance;
   final _presence = PresenceService.instance;
   final _search = TextEditingController();
   final _focus = FocusNode();
@@ -162,7 +163,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   Timer? _unlock;
   RealtimeChannel? _channel;
 
-  String get _me => _db.auth.currentUser?.id ?? '';
+  String get _me => _gateway.currentUser?.id ?? '';
 
   @override
   void initState() {
@@ -196,7 +197,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     _debounce?.cancel();
     _unlock?.cancel();
     final ch = _channel;
-    if (ch != null) unawaited(_db.removeChannel(ch));
+    if (ch != null) unawaited(_gateway.removeChannel(ch));
     _focus.dispose();
     _search.dispose();
     super.dispose();
@@ -242,7 +243,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
 
   void _listen() {
     if (_me.isEmpty || _channel != null) return;
-    _channel = _db
+    _channel = _gateway
         .channel('preview_$_me')
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
@@ -270,8 +271,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
 
     _busy = true;
     try {
-      final res = await _db.rpc('get_chat_previews');
-      final rows = List<Map<String, dynamic>>.from(res as List);
+      final rows = await _gateway.fetchChatPreviews();
       if (!mounted) return;
       setState(() {
         _chats = rows.map((r) => _Preview.from(r, _me)).toList();

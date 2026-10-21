@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../api_gateway.dart';
 import '../../../../main.dart';
 
 const _months = [
@@ -38,11 +39,24 @@ const _editWindow = Duration(minutes: 30);
 const _sliderGap = 6.0;
 const _sliderRoom = 220.0;
 
-String _fmtDate(String? iso) {
+String _fmtTime(String? iso) {
   if (iso == null || iso.isEmpty) return '';
   final dt = DateTime.tryParse(iso)?.toLocal();
   if (dt == null) return '';
-  return '${dt.day} ${_months[dt.month - 1]} ${dt.year}';
+  final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final m = dt.minute.toString().padLeft(2, '0');
+  final ampm = dt.hour >= 12 ? 'PM' : 'AM';
+  return '$h:$m $ampm';
+}
+
+String _fmtFullDate(String? iso) {
+  if (iso == null || iso.isEmpty) return 'Unknown Date';
+  final dt = DateTime.tryParse(iso)?.toLocal();
+  if (dt == null) return 'Unknown Date';
+  final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final m = dt.minute.toString().padLeft(2, '0');
+  final ampm = dt.hour >= 12 ? 'PM' : 'AM';
+  return '${dt.day} ${_months[dt.month - 1]} ${dt.year} at $h:$m $ampm';
 }
 
 String _fmtSeen(DateTime dt) {
@@ -50,7 +64,7 @@ String _fmtSeen(DateTime dt) {
   final m = dt.minute.toString().padLeft(2, '0');
   final ampm = dt.hour >= 12 ? 'PM' : 'AM';
   final yr = dt.year == DateTime.now().year ? '' : ' ${dt.year}';
-  return '${dt.day} ${_months[dt.month - 1]}$yr, $h:$m $ampm';
+  return '${dt.day} ${_months[dt.month - 1]}$yr $h:$m $ampm';
 }
 
 DateTime? _parseTime(dynamic raw) {
@@ -112,7 +126,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _focus = FocusNode();
   final _scroll = ScrollController();
-  final _db = Supabase.instance.client;
+  final _gateway = ApiGateway.instance;
   final _presence = PresenceService.instance;
   final _lastSeen = ValueNotifier<DateTime?>(null);
   final _notice = ValueNotifier<bool>(false);
@@ -127,12 +141,12 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription? _msgSub;
   StreamSubscription? _profileSub;
 
-  String get _me => _db.auth.currentUser?.id ?? '';
+  String get _me => _gateway.currentUser?.id ?? '';
   String get _other => (widget.user['id'] ?? '').toString();
 
   Map<String, dynamic> get _meUser {
     if (_meProfile.isNotEmpty) return _meProfile;
-    final auth = _db.auth.currentUser;
+    final auth = _gateway.currentUser;
     return {...?auth?.userMetadata, 'email': auth?.email};
   }
 
@@ -223,11 +237,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       unawaited(_ChatUserAvatar.fetch(_avatarOf(_meUser)));
 
-      final row = await _db
-          .from('profiles')
-          .select('first_name, last_name, display_name, email, avatar_url')
-          .eq('id', _me)
-          .maybeSingle();
+      final row = await _gateway.fetchProfile(_me);
       if (row == null) return;
       await file.writeAsString(jsonEncode(row));
       if (mounted) setState(() => _meProfile = row);
@@ -237,10 +247,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _listenMessages() {
     _msgSub?.cancel();
-    _msgSub = _db
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .order('created_at', ascending: true)
+    _msgSub = _gateway
+        .streamMessages(_me, _other)
         .listen(_onMessages, onError: (_) => _streamFailed());
   }
 
@@ -251,27 +259,16 @@ class _ChatScreenState extends State<ChatScreen> {
   void _listenProfile() {
     if (_other.isEmpty) return;
     _profileSub?.cancel();
-    _profileSub = _db
-        .from('profiles')
-        .stream(primaryKey: ['id'])
-        .eq('id', _other)
-        .listen((rows) {
-          if (rows.isEmpty) return;
-          _lastSeen.value = _parseTime(rows.first['last_seen']);
-        }, onError: (_) {});
+    _profileSub = _gateway.streamProfile(_other).listen((rows) {
+      if (rows.isEmpty) return;
+      _lastSeen.value = _parseTime(rows.first['last_seen']);
+    }, onError: (_) {});
   }
 
   Future<void> _fetchRemote() async {
     try {
-      final res = await _db
-          .from('messages')
-          .select()
-          .or(
-            'and(sender_id.eq.$_me,receiver_id.eq.$_other),'
-            'and(sender_id.eq.$_other,receiver_id.eq.$_me)',
-          )
-          .order('created_at', ascending: true);
-      _onMessages(List<Map<String, dynamic>>.from(res));
+      final res = await _gateway.fetchMessages(_me, _other);
+      _onMessages(res);
     } catch (_) {
       if (mounted && _loading) setState(() => _loading = false);
     }
@@ -279,25 +276,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _markSeen() async {
     try {
-      await _db.rpc('mark_seen', params: {'p_sender': _other});
+      await _gateway.markSeen(_other);
     } catch (_) {}
   }
 
   void _onMessages(List<Map<String, dynamic>> data) {
-    final rows = data.where((m) {
-      final s = m['sender_id'];
-      final r = m['receiver_id'];
-      return (s == _me && r == _other) || (s == _other && r == _me);
-    }).toList();
-
-    if (rows.any((m) => m['receiver_id'] == _me && m['status'] != 'seen')) {
+    if (data.any((m) => m['receiver_id'] == _me && m['status'] != 'seen')) {
       _markSeen();
     }
     if (!mounted) return;
 
     final queued = _msgs.where((m) => _pending.contains(m['id'])).toList();
     final known = _msgs.map((m) => m['id']).toSet();
-    for (final row in rows) {
+    for (final row in data) {
       if (known.contains(row['id']) || row['sender_id'] != _me) continue;
       final i = queued.indexWhere((q) => q['message'] == row['message']);
       if (i == -1) continue;
@@ -306,7 +297,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     setState(() {
-      _msgs = [...rows, ...queued];
+      _msgs = [...data, ...queued];
       _loading = false;
     });
     _saveLocal();
@@ -391,17 +382,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _toBottom();
 
     try {
-      final row = await _db
-          .from('messages')
-          .insert({
-            'sender_id': _me,
-            'receiver_id': _other,
-            'message': body,
-            'status': status,
-            'reply_to': ?replyId,
-          })
-          .select()
-          .single();
+      final row = await _gateway.sendMessage(
+        senderId: _me,
+        receiverId: _other,
+        message: body,
+        status: status,
+        replyTo: replyId,
+      );
 
       _pending.remove(tempId);
       if (!mounted) return;
@@ -428,8 +415,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _mutate(
     String id,
     Map<String, dynamic> changes,
-    String fn,
-    Map<String, dynamic> params,
+    Future<bool> Function() action,
   ) async {
     if (!_presence.connected.value) {
       _flashNotice();
@@ -443,8 +429,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _saveLocal();
 
     try {
-      final ok = await _db.rpc(fn, params: params);
-      if (ok != true) throw StateError('rejected');
+      final ok = await action();
+      if (!ok) throw StateError('rejected');
     } catch (_) {
       if (!mounted) return;
       final j = _msgs.indexWhere((m) => m['id'] == id);
@@ -455,29 +441,24 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _react(Map<String, dynamic> m, String? emoji) {
-    _mutate(
-      m['id'],
-      {
-        'reaction': emoji,
-        'reacted_at': emoji == null
-            ? null
-            : DateTime.now().toUtc().toIso8601String(),
-      },
-      'react_message',
-      {'p_id': m['id'], 'p_emoji': emoji},
-    );
+    _mutate(m['id'], {
+      'reaction': emoji,
+      'reacted_at': emoji == null
+          ? null
+          : DateTime.now().toUtc().toIso8601String(),
+    }, () => _gateway.reactMessage(m['id'], emoji));
   }
 
   void _unsend(Map<String, dynamic> m) {
     if (_editing?['id'] == m['id'] || _replying?['id'] == m['id']) {
       _cancelCompose();
     }
-    _mutate(
-      m['id'],
-      {'is_unsent': true, 'message': '', 'reaction': null, 'reacted_at': null},
-      'unsend_message',
-      {'p_id': m['id']},
-    );
+    _mutate(m['id'], {
+      'is_unsent': true,
+      'message': '',
+      'reaction': null,
+      'reacted_at': null,
+    }, () => _gateway.unsendMessage(m['id']));
   }
 
   Future<void> _commitEdit(String text) async {
@@ -492,12 +473,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final body = _encode(text);
     _cancelCompose();
-    await _mutate(
-      target['id'],
-      {'message': body, 'is_edited': true},
-      'edit_message',
-      {'p_id': target['id'], 'p_message': body},
-    );
+    await _mutate(target['id'], {
+      'message': body,
+      'is_edited': true,
+    }, () => _gateway.editMessage(target['id'], body));
   }
 
   void _startEdit(Map<String, dynamic> m) {
@@ -524,6 +503,82 @@ class _ChatScreenState extends State<ChatScreen> {
       _replying = null;
     });
     if (wasEditing) _input.clear();
+  }
+
+  void _showMessageDetails(Map<String, dynamic> m) {
+    final isMine = m['sender_id'] == _me;
+    final formatted = _fmtFullDate(m['created_at']);
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '',
+      barrierColor: Colors.black45,
+      transitionDuration: const Duration(milliseconds: 150),
+      pageBuilder: (context, anim, secAnim) => const SizedBox.shrink(),
+      transitionBuilder: (context, anim, secAnim, child) {
+        final dark = Theme.of(context).brightness == Brightness.dark;
+        final curved = CurvedAnimation(
+          parent: anim,
+          curve: Curves.easeOutCubic,
+        );
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 1),
+            end: Offset.zero,
+          ).animate(curved),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: Container(
+                margin: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 24,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: dark ? const Color(0xFF1E1E1E) : Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isMine ? 'Sent Message Info' : 'Received Message Info',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: dark ? Colors.white : Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        formatted,
+                        style: const TextStyle(fontSize: 11, color: _grey),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _onHold(Map<String, dynamic> m, Rect anchor) {
@@ -728,7 +783,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return MessageBubble(
           key: ValueKey(m['id']),
           message: _decode(m['message'] ?? ''),
-          date: _fmtDate(m['created_at']),
+          date: _fmtTime(m['created_at']),
           isMe: m['sender_id'] == _me,
           isDark: dark,
           status: m['status'] ?? 'sent',
@@ -737,6 +792,7 @@ class _ChatScreenState extends State<ChatScreen> {
           reaction: (m['reaction'] ?? '').toString(),
           replyWho: replied == null ? null : _who(replied),
           replyText: replied == null ? null : _preview(replied),
+          onTap: () => _showMessageDetails(m),
           onHold: (rect) => _onHold(m, rect),
           onReactionTap: (rect) => _showReactor(m, rect),
         );
@@ -907,7 +963,7 @@ class _PresenceLine extends StatelessWidget {
 
         final seen = lastSeen.value;
         return Text(
-          seen == null ? 'offline' : 'Last seen at ${_fmtSeen(seen)}',
+          seen == null ? 'offline' : 'Last online at ${_fmtSeen(seen)}',
           style: _subStyle,
         );
       },
@@ -961,6 +1017,7 @@ class MessageBubble extends StatelessWidget {
   final String reaction;
   final String? replyWho;
   final String? replyText;
+  final VoidCallback onTap;
   final ValueChanged<Rect> onHold;
   final ValueChanged<Rect> onReactionTap;
 
@@ -974,6 +1031,7 @@ class MessageBubble extends StatelessWidget {
     required this.unsent,
     required this.edited,
     required this.reaction,
+    required this.onTap,
     required this.onHold,
     required this.onReactionTap,
     this.replyWho,
@@ -1093,20 +1151,24 @@ class MessageBubble extends StatelessWidget {
   }
 
   Widget _meta() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 2, left: 4, right: 4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (edited && !unsent) ...[
-            const Text('Edited', style: TextStyle(fontSize: 8, color: _grey)),
-            const SizedBox(width: 4),
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 2, left: 4, right: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (edited && !unsent) ...[
+              const Text('Edited', style: TextStyle(fontSize: 8, color: _grey)),
+              const SizedBox(width: 4),
+            ],
+            if (date.isNotEmpty)
+              Text(date, style: const TextStyle(fontSize: 8, color: _grey)),
+            if (isMe && date.isNotEmpty) const SizedBox(width: 4),
+            if (isMe) _tick(),
           ],
-          if (date.isNotEmpty)
-            Text(date, style: const TextStyle(fontSize: 8, color: _grey)),
-          if (isMe && date.isNotEmpty) const SizedBox(width: 4),
-          if (isMe) _tick(),
-        ],
+        ),
       ),
     );
   }
@@ -1135,9 +1197,12 @@ class MessageBubble extends StatelessWidget {
                     builder: (context) {
                       return _HoldDetector(
                         onHold: () => onHold(_rectOf(context)),
-                        child: _body(
-                          isMe ? CupertinoColors.activeBlue : theirBg,
-                          isMe ? Colors.white : theirTxt,
+                        child: GestureDetector(
+                          onTap: onTap,
+                          child: _body(
+                            isMe ? CupertinoColors.activeBlue : theirBg,
+                            isMe ? Colors.white : theirTxt,
+                          ),
                         ),
                       );
                     },

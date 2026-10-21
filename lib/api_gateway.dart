@@ -87,18 +87,20 @@ class ApiGateway {
     required String gender,
   }) async {
     try {
-      await _db.functions.invoke(
-        'google-signup',
-        body: {
-          'id_token': idToken,
-          'email': email.trim().toLowerCase(),
-          'password': password,
-          'first_name': firstName.trim(),
-          'last_name': lastName.trim(),
-          'dob': dob.toIso8601String().substring(0, 10),
-          'gender': gender,
-        },
-      ).timeout(_timeout);
+      await _db.functions
+          .invoke(
+            'google-signup',
+            body: {
+              'id_token': idToken,
+              'email': email.trim().toLowerCase(),
+              'password': password,
+              'first_name': firstName.trim(),
+              'last_name': lastName.trim(),
+              'dob': dob.toIso8601String().substring(0, 10),
+              'gender': gender,
+            },
+          )
+          .timeout(_timeout);
     } on FunctionException catch (e) {
       final details = e.details;
       final code = details is Map ? details['error'] as String? : null;
@@ -108,7 +110,10 @@ class ApiGateway {
 
   Future<User> signIn(String email, String password) async {
     final res = await _db.auth
-        .signInWithPassword(email: email.trim().toLowerCase(), password: password)
+        .signInWithPassword(
+          email: email.trim().toLowerCase(),
+          password: password,
+        )
         .timeout(_timeout);
     final user = res.user;
     if (user == null) throw const GatewayException('signin_failed');
@@ -145,16 +150,117 @@ class ApiGateway {
     if (user == null) throw const GatewayException('not_signed_in');
 
     await _db.auth
-        .updateUser(UserAttributes(data: {'profile_image': url, 'avatar_url': url}))
+        .updateUser(
+          UserAttributes(data: {'profile_image': url, 'avatar_url': url}),
+        )
         .timeout(_timeout);
     await _db
         .from('profiles')
-        .update({'avatar_url': url, 'updated_at': DateTime.now().toUtc().toIso8601String()})
+        .update({
+          'avatar_url': url,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        })
         .eq('id', user.id)
         .timeout(_timeout);
   }
 
   Future<void> signOut() async {
     await _db.auth.signOut();
+  }
+
+  Stream<List<Map<String, dynamic>>> streamMessages(String me, String other) {
+    return _db
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .order('created_at', ascending: true)
+        .map(
+          (rows) => rows.where((m) {
+            final s = m['sender_id'];
+            final r = m['receiver_id'];
+            return (s == me && r == other) || (s == other && r == me);
+          }).toList(),
+        );
+  }
+
+  Future<List<Map<String, dynamic>>> fetchMessages(
+    String me,
+    String other,
+  ) async {
+    final res = await _db
+        .from('messages')
+        .select()
+        .or(
+          'and(sender_id.eq.$me,receiver_id.eq.$other),'
+          'and(sender_id.eq.$other,receiver_id.eq.$me)',
+        )
+        .order('created_at', ascending: true)
+        .timeout(_timeout);
+    return List<Map<String, dynamic>>.from(res);
+  }
+
+  Future<Map<String, dynamic>> sendMessage({
+    required String senderId,
+    required String receiverId,
+    required String message,
+    required String status,
+    String? replyTo,
+  }) async {
+    final res = await _db
+        .from('messages')
+        .insert({
+          'sender_id': senderId,
+          'receiver_id': receiverId,
+          'message': message,
+          'status': status,
+          ...?replyTo == null ? null : {'reply_to': replyTo},
+        })
+        .select()
+        .single()
+        .timeout(_timeout);
+    return res;
+  }
+
+  Future<void> markSeen(String senderId) async {
+    await rpc('mark_seen', params: {'p_sender': senderId});
+  }
+
+  Future<bool> editMessage(String id, String message) async {
+    final res = await rpc(
+      'edit_message',
+      params: {'p_id': id, 'p_message': message},
+    );
+    return res == true;
+  }
+
+  Future<bool> unsendMessage(String id) async {
+    final res = await rpc('unsend_message', params: {'p_id': id});
+    return res == true;
+  }
+
+  Future<bool> reactMessage(String id, String? emoji) async {
+    final res = await rpc(
+      'react_message',
+      params: {'p_id': id, 'p_emoji': emoji},
+    );
+    return res == true;
+  }
+
+  Future<List<Map<String, dynamic>>> fetchChatPreviews() async {
+    final res = await rpc('get_chat_previews');
+    return List<Map<String, dynamic>>.from(res as List);
+  }
+
+  Future<Map<String, dynamic>?> fetchProfile(String userId) async {
+    final row = await _db
+        .from('profiles')
+        .select('first_name, last_name, display_name, email, avatar_url')
+        .eq('id', userId)
+        .maybeSingle()
+        .timeout(_timeout);
+    return row;
+  }
+
+  Stream<List<Map<String, dynamic>>> streamProfile(String userId) {
+    return _db.from('profiles').stream(primaryKey: ['id']).eq('id', userId);
   }
 }
