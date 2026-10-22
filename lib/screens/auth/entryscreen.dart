@@ -105,7 +105,8 @@ class WelcomeCardHeader extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            padding: const EdgeInsets.all(16),
+            width: 80,
+            height: 80,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(22),
               color: dark ? const Color(0xFF222225) : const Color(0xFFF0F3F7),
@@ -114,11 +115,9 @@ class WelcomeCardHeader extends StatelessWidget {
                 width: 1,
               ),
             ),
-            child: Image.asset(
-              'assets/icon/icon.png',
-              width: 56,
-              height: 56,
-              fit: BoxFit.contain,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(21),
+              child: Image.asset('assets/icon/icon.png', fit: BoxFit.cover),
             ),
           ),
           const SizedBox(height: 26),
@@ -153,28 +152,46 @@ class ActionButtonsContainer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return const Column(
       children: [
-        AppButton(
-          text: 'Log In',
-          icon: Icons.login_rounded,
-          primary: true,
-          onPressed: () => Navigator.push(
-            context,
-            CupertinoPageRoute(builder: (_) => const LoginScreen()),
-          ),
-        ),
-        const SizedBox(height: 16),
-        AppButton(
-          text: 'Create Account',
-          icon: Icons.person_add_outlined,
-          primary: false,
-          onPressed: () => Navigator.push(
-            context,
-            CupertinoPageRoute(builder: (_) => const CreateNameScreen()),
-          ),
-        ),
+        PrimaryActionButton(),
+        SizedBox(height: 16),
+        SecondaryActionButton(),
       ],
+    );
+  }
+}
+
+class PrimaryActionButton extends StatelessWidget {
+  const PrimaryActionButton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppButton(
+      text: 'Log In',
+      icon: Icons.login_rounded,
+      primary: true,
+      onPressed: () => Navigator.push(
+        context,
+        CupertinoPageRoute(builder: (_) => const LoginScreen()),
+      ),
+    );
+  }
+}
+
+class SecondaryActionButton extends StatelessWidget {
+  const SecondaryActionButton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppButton(
+      text: 'Create Account',
+      icon: Icons.person_add_outlined,
+      primary: false,
+      onPressed: () => Navigator.push(
+        context,
+        CupertinoPageRoute(builder: (_) => const CreateNameScreen()),
+      ),
     );
   }
 }

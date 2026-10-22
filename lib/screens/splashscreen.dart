@@ -83,7 +83,13 @@ class _SplashScreenState extends State<SplashScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Image.asset('assets/icon/icon.png', width: size.width * 0.20),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.asset(
+                      'assets/icon/icon.png',
+                      width: size.width * 0.20,
+                    ),
+                  ),
                   const SizedBox(height: 10),
                   AnimatedBuilder(
                     animation: _dotsController,

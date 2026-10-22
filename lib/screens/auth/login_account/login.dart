@@ -87,6 +87,184 @@ class _GoogleAuth {
   }
 }
 
+class SavedAccountStore {
+  static const String _key = 'saved_accounts';
+  static const FlutterSecureStorage _vault = FlutterSecureStorage();
+
+  static Future<List<Map<String, dynamic>>> _read() async {
+    try {
+      final raw = await _vault.read(key: _key);
+      if (raw == null || raw.isEmpty) return [];
+      return (jsonDecode(raw) as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> _write(List<Map<String, dynamic>> accounts) {
+    return _vault.write(key: _key, value: jsonEncode(accounts));
+  }
+
+  static Future<void> _moveOldAccounts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final old = prefs.getStringList(_key);
+    if (old == null) return;
+
+    final accounts = await _read();
+    for (final item in old) {
+      final acc = jsonDecode(item) as Map<String, dynamic>;
+      final exists = accounts.any((a) => a['id'] == acc['id']);
+      if (!exists) accounts.add(acc);
+    }
+    await _write(accounts);
+    await prefs.remove(_key);
+  }
+
+  static DateTime _loginTime(Map<String, dynamic> acc) {
+    return DateTime.tryParse(acc['last_login'] ?? '') ?? DateTime(2000);
+  }
+
+  static Future<String> _cacheAvatar(String url, String userId) async {
+    if (url.isEmpty) return '';
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final dir = await getApplicationDocumentsDirectory();
+        final file = File('${dir.path}/avatar_$userId.jpg');
+        await file.writeAsBytes(response.bodyBytes);
+        return file.path;
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  static Future<List<Map<String, dynamic>>> load() async {
+    try {
+      await _moveOldAccounts();
+    } catch (_) {}
+    final accounts = await _read();
+    accounts.sort((a, b) => _loginTime(b).compareTo(_loginTime(a)));
+    return accounts;
+  }
+
+  static Future<void> save({required User user, String? password}) async {
+    try {
+      final accounts = await _read();
+      final hasPassword = accounts.any(
+        (a) => a['id'] == user.id && a['password'] != null,
+      );
+      if (password == null && hasPassword) {
+        await touch(user.id);
+        return;
+      }
+
+      final meta = user.userMetadata ?? {};
+      final email = (user.email ?? '').toLowerCase();
+      final avatarUrl =
+          (meta['profile_image'] ?? meta['avatar_url'] ?? meta['picture'] ?? '')
+              .toString();
+
+      accounts.removeWhere((a) => a['id'] == user.id || a['email'] == email);
+      accounts.add({
+        'id': user.id,
+        'email': email,
+        'provider': password == null ? 'google' : 'password',
+        'password': password,
+        'first_name': (meta['first_name'] ?? meta['name'] ?? 'User').toString(),
+        'last_name': (meta['last_name'] ?? '').toString(),
+        'avatar_url': avatarUrl,
+        'local_avatar_path': await _cacheAvatar(avatarUrl, user.id),
+        'last_login': DateTime.now().toIso8601String(),
+      });
+      await _write(accounts);
+    } catch (_) {}
+  }
+
+  static Future<void> touch(String id) async {
+    final accounts = await _read();
+    for (final acc in accounts) {
+      if (acc['id'] == id) {
+        acc['last_login'] = DateTime.now().toIso8601String();
+      }
+    }
+    await _write(accounts);
+  }
+
+  static Future<void> remove(String id) async {
+    final accounts = await _read();
+    accounts.removeWhere((a) => a['id'] == id);
+    await _write(accounts);
+  }
+}
+
+class GoogleLogo extends StatelessWidget {
+  const GoogleLogo({super.key, this.size = 24});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: const CustomPaint(painter: _GoogleLogoPainter()),
+    );
+  }
+}
+
+class _GoogleLogoPainter extends CustomPainter {
+  const _GoogleLogoPainter();
+
+  static const _blue = Color(0xFF4285F4);
+  static const _red = Color(0xFFEA4335);
+  static const _yellow = Color(0xFFFBBC05);
+  static const _green = Color(0xFF34A853);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = size.width * 0.2;
+    final center = size.center(Offset.zero);
+    final arcBounds = Rect.fromCircle(
+      center: center,
+      radius: (size.width - stroke) / 2,
+    );
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke;
+
+    void drawArc(Color color, double startDegrees, double sweepDegrees) {
+      paint.color = color;
+      canvas.drawArc(
+        arcBounds,
+        startDegrees * math.pi / 180,
+        sweepDegrees * math.pi / 180,
+        false,
+        paint,
+      );
+    }
+
+    drawArc(_red, -150, 105);
+    drawArc(_yellow, 150, 60);
+    drawArc(_green, 45, 105);
+    drawArc(_blue, 0, 45);
+
+    canvas.drawRect(
+      Rect.fromLTRB(
+        center.dx,
+        center.dy - stroke / 2,
+        size.width,
+        center.dy + stroke / 2,
+      ),
+      Paint()..color = _blue,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -135,6 +313,41 @@ class _LoginScreenState extends State<LoginScreen> {
         content: Text(message),
         backgroundColor: Colors.redAccent,
         behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _showInfoDialog(BuildContext context) {
+    showCupertinoDialog(
+      context: context,
+      builder: (dialogContext) => CupertinoAlertDialog(
+        title: const Text('Login Methods Guide'),
+        content: const Padding(
+          padding: EdgeInsets.only(top: 10.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '1. Standard Login:\nSign in using your Email & Password. For enhanced security, a 2-Step Verification code generated via the Talksy Authenticator app must be entered within 60 seconds.',
+                textAlign: TextAlign.justify,
+                style: TextStyle(fontSize: 13, height: 1.35),
+              ),
+              SizedBox(height: 10),
+              Text(
+                '2. Direct Google Sign-In:\nAlternatively, use Google Sign-In for seamless access. If you ever forget your password, you can sign in directly through Google.',
+                textAlign: TextAlign.justify,
+                style: TextStyle(fontSize: 13, height: 1.35),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Got it'),
+          ),
+        ],
       ),
     );
   }
@@ -245,7 +458,6 @@ class _LoginScreenState extends State<LoginScreen> {
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
     final lineColor = isDark ? Colors.grey.shade800 : Colors.grey.shade300;
-    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
 
     return Scaffold(
       backgroundColor: bg,
@@ -290,213 +502,209 @@ class _LoginScreenState extends State<LoginScreen> {
           'Log In',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.info_outline, size: 22, color: textColor),
+            onPressed: () => _showInfoDialog(context),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Stack(
           children: [
-            LayoutBuilder(
-              builder: (context, constraints) => SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(
-                  24.0,
-                  12,
-                  24.0,
-                  keyboardHeight + 80,
-                ),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                  child: Column(
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Welcome back',
+                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Sign in with your credentials to continue.',
+                    style: TextStyle(fontSize: 16, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: _emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      labelText: 'Email',
+                      filled: true,
+                      fillColor: Theme.of(context).cardColor,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _passCtrl,
+                    obscureText: _obscurePassword,
+                    decoration: InputDecoration(
+                      labelText: 'Password',
+                      filled: true,
+                      fillColor: Theme.of(context).cardColor,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                        ),
+                        onPressed: () => setState(
+                          () => _obscurePassword = !_obscurePassword,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Welcome back',
-                        style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Sign in with your credentials to continue.',
-                        style: TextStyle(fontSize: 16, color: Colors.grey),
-                      ),
-                      const SizedBox(height: 20),
-                      TextField(
-                        controller: _emailCtrl,
-                        keyboardType: TextInputType.emailAddress,
-                        decoration: InputDecoration(
-                          labelText: 'Email',
-                          filled: true,
-                          fillColor: Theme.of(context).cardColor,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _passCtrl,
-                        obscureText: _obscurePassword,
-                        decoration: InputDecoration(
-                          labelText: 'Password',
-                          filled: true,
-                          fillColor: Theme.of(context).cardColor,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscurePassword
-                                  ? Icons.visibility_off
-                                  : Icons.visibility,
-                            ),
-                            onPressed: () => setState(
-                              () => _obscurePassword = !_obscurePassword,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      Row(
                         children: [
-                          Row(
-                            children: [
-                              SizedBox(
-                                height: 24,
-                                width: 24,
-                                child: Checkbox(
-                                  value: _rememberPassword,
-                                  onChanged: (val) {
-                                    setState(() {
-                                      _rememberPassword = val ?? false;
-                                    });
-                                  },
-                                  activeColor: primary,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                ),
+                          SizedBox(
+                            height: 24,
+                            width: 24,
+                            child: Checkbox(
+                              value: _rememberPassword,
+                              onChanged: (val) {
+                                setState(() {
+                                  _rememberPassword = val ?? false;
+                                });
+                              },
+                              activeColor: primary,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(4),
                               ),
-                              const SizedBox(width: 8),
-                              GestureDetector(
-                                onTap: () {
-                                  setState(() {
-                                    _rememberPassword = !_rememberPassword;
-                                  });
-                                },
-                                child: Text(
-                                  'Remember password',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: isDark
-                                        ? Colors.white70
-                                        : Colors.black87,
-                                  ),
-                                ),
-                              ),
-                            ],
+                            ),
                           ),
-                          const SizedBox(height: 2),
-                          Padding(
-                            padding: const EdgeInsets.only(left: 32),
+                          const SizedBox(width: 8),
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _rememberPassword = !_rememberPassword;
+                              });
+                            },
                             child: Text(
-                              'When you check this option, your account will be saved on talksy and you don\'t need to enter password and verify code again to re-login.',
-                              style: TextStyle(fontSize: 11, color: mutedColor),
+                              'Remember password',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: isDark ? Colors.white70 : Colors.black87,
+                              ),
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 14),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 48,
-                        child: ElevatedButton(
-                          onPressed: canSubmit ? _onAuthenticate : null,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: canSubmit ? primary : disabledBg,
-                            foregroundColor: canSubmit
-                                ? Colors.white
-                                : disabledFg,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                          child: _isAuthenticating
-                              ? SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    color: disabledFg,
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Text(
+                      const SizedBox(height: 2),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 32),
+                        child: Text(
+                          'When you check this option, your account will be saved on talksy and you don\'t need to enter password and verify code again to re-login.',
+                          style: TextStyle(fontSize: 11, color: mutedColor),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: canSubmit ? _onAuthenticate : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: canSubmit ? primary : disabledBg,
+                        foregroundColor: canSubmit ? Colors.white : disabledFg,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: _isAuthenticating
+                          ? SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                color: disabledFg,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.shield_outlined, size: 20),
+                                SizedBox(width: 8),
+                                Text(
                                   'Authenticate',
                                   style: TextStyle(
                                     fontSize: 16,
                                     fontWeight: FontWeight.bold,
                                   ),
                                 ),
+                              ],
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(child: Divider(color: lineColor)),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'Or',
+                          style: TextStyle(fontSize: 14, color: mutedColor),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      Row(
-                        children: [
-                          Expanded(child: Divider(color: lineColor)),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            child: Text(
-                              'Or',
-                              style: TextStyle(fontSize: 14, color: mutedColor),
-                            ),
-                          ),
-                          Expanded(child: Divider(color: lineColor)),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 48,
-                        child: OutlinedButton(
-                          onPressed: _busy ? null : _onGoogleSignIn,
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: textColor,
-                            side: BorderSide(color: lineColor, width: 1.2),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              _isGoogleLoading
-                                  ? SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.2,
-                                        color: primary,
-                                      ),
-                                    )
-                                  : const GoogleLogo(size: 20),
-                              const SizedBox(width: 12),
-                              Text(
-                                _isGoogleLoading
-                                    ? 'Signing in...'
-                                    : 'Sign in with Google',
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                      Expanded(child: Divider(color: lineColor)),
                     ],
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: _busy ? null : _onGoogleSignIn,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: textColor,
+                        side: BorderSide(color: lineColor, width: 1.2),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _isGoogleLoading
+                              ? SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.2,
+                                    color: primary,
+                                  ),
+                                )
+                              : const GoogleLogo(size: 20),
+                          const SizedBox(width: 12),
+                          Text(
+                            _isGoogleLoading
+                                ? 'Signing in...'
+                                : 'Sign in with Google',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             Positioned(
@@ -525,184 +733,6 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
       ),
     );
-  }
-}
-
-class GoogleLogo extends StatelessWidget {
-  const GoogleLogo({super.key, this.size = 24});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: const CustomPaint(painter: _GoogleLogoPainter()),
-    );
-  }
-}
-
-class _GoogleLogoPainter extends CustomPainter {
-  const _GoogleLogoPainter();
-
-  static const _blue = Color(0xFF4285F4);
-  static const _red = Color(0xFFEA4335);
-  static const _yellow = Color(0xFFFBBC05);
-  static const _green = Color(0xFF34A853);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final stroke = size.width * 0.2;
-    final center = size.center(Offset.zero);
-    final arcBounds = Rect.fromCircle(
-      center: center,
-      radius: (size.width - stroke) / 2,
-    );
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke;
-
-    void drawArc(Color color, double startDegrees, double sweepDegrees) {
-      paint.color = color;
-      canvas.drawArc(
-        arcBounds,
-        startDegrees * math.pi / 180,
-        sweepDegrees * math.pi / 180,
-        false,
-        paint,
-      );
-    }
-
-    drawArc(_red, -150, 105);
-    drawArc(_yellow, 150, 60);
-    drawArc(_green, 45, 105);
-    drawArc(_blue, 0, 45);
-
-    canvas.drawRect(
-      Rect.fromLTRB(
-        center.dx,
-        center.dy - stroke / 2,
-        size.width,
-        center.dy + stroke / 2,
-      ),
-      Paint()..color = _blue,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class SavedAccountStore {
-  static const String _key = 'saved_accounts';
-  static const FlutterSecureStorage _vault = FlutterSecureStorage();
-
-  static Future<List<Map<String, dynamic>>> _read() async {
-    try {
-      final raw = await _vault.read(key: _key);
-      if (raw == null || raw.isEmpty) return [];
-      return (jsonDecode(raw) as List)
-          .map((item) => Map<String, dynamic>.from(item as Map))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  static Future<void> _write(List<Map<String, dynamic>> accounts) {
-    return _vault.write(key: _key, value: jsonEncode(accounts));
-  }
-
-  static Future<void> _moveOldAccounts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final old = prefs.getStringList(_key);
-    if (old == null) return;
-
-    final accounts = await _read();
-    for (final item in old) {
-      final acc = jsonDecode(item) as Map<String, dynamic>;
-      final exists = accounts.any((a) => a['id'] == acc['id']);
-      if (!exists) accounts.add(acc);
-    }
-    await _write(accounts);
-    await prefs.remove(_key);
-  }
-
-  static DateTime _loginTime(Map<String, dynamic> acc) {
-    return DateTime.tryParse(acc['last_login'] ?? '') ?? DateTime(2000);
-  }
-
-  static Future<String> _cacheAvatar(String url, String userId) async {
-    if (url.isEmpty) return '';
-    try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final dir = await getApplicationDocumentsDirectory();
-        final file = File('${dir.path}/avatar_$userId.jpg');
-        await file.writeAsBytes(response.bodyBytes);
-        return file.path;
-      }
-    } catch (_) {}
-    return '';
-  }
-
-  static Future<List<Map<String, dynamic>>> load() async {
-    try {
-      await _moveOldAccounts();
-    } catch (_) {}
-    final accounts = await _read();
-    accounts.sort((a, b) => _loginTime(b).compareTo(_loginTime(a)));
-    return accounts;
-  }
-
-  static Future<void> save({required User user, String? password}) async {
-    try {
-      final accounts = await _read();
-      final hasPassword = accounts.any(
-        (a) => a['id'] == user.id && a['password'] != null,
-      );
-      if (password == null && hasPassword) {
-        await touch(user.id);
-        return;
-      }
-
-      final meta = user.userMetadata ?? {};
-      final email = (user.email ?? '').toLowerCase();
-      final avatarUrl =
-          (meta['profile_image'] ?? meta['avatar_url'] ?? meta['picture'] ?? '')
-              .toString();
-
-      accounts.removeWhere((a) => a['id'] == user.id || a['email'] == email);
-      accounts.add({
-        'id': user.id,
-        'email': email,
-        'provider': password == null ? 'google' : 'password',
-        'password': ?password,
-        'first_name': (meta['first_name'] ?? meta['name'] ?? 'User').toString(),
-        'last_name': (meta['last_name'] ?? '').toString(),
-        'avatar_url': avatarUrl,
-        'local_avatar_path': await _cacheAvatar(avatarUrl, user.id),
-        'last_login': DateTime.now().toIso8601String(),
-      });
-      await _write(accounts);
-    } catch (_) {}
-  }
-
-  static Future<void> touch(String id) async {
-    final accounts = await _read();
-    for (final acc in accounts) {
-      if (acc['id'] == id) {
-        acc['last_login'] = DateTime.now().toIso8601String();
-      }
-    }
-    await _write(accounts);
-  }
-
-  static Future<void> remove(String id) async {
-    final accounts = await _read();
-    accounts.removeWhere((a) => a['id'] == id);
-    await _write(accounts);
   }
 }
 
