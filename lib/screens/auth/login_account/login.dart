@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -6,12 +5,13 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:supabase_flutter/supabase_flutter.dart'
+    show AuthApiException, User;
 import 'package:talksy/api_gateway.dart';
+import 'package:talksy/local_db.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 
 import 'home/home.dart';
@@ -39,47 +39,26 @@ class _GoogleLoginException implements Exception {
 }
 
 class _GoogleAuth {
-  static Future<void> signOut() async {
-    try {
-      await GoogleSignIn.instance.signOut();
-    } catch (_) {}
-  }
+  static Future<User?> signIn({String? expectedEmail}) async {
+    final identity = await _api.pickGoogleAccount();
+    if (identity == null) return null;
 
-  static Future<User> signIn({String? expectedEmail}) async {
-    final account = await GoogleSignIn.instance.authenticate();
-    final email = account.email.trim().toLowerCase();
-
+    final email = identity.email.trim().toLowerCase();
     if (expectedEmail != null && email != expectedEmail.toLowerCase()) {
-      await signOut();
+      await _api.releaseGoogleAccount();
       throw _GoogleLoginException('Please sign in with $expectedEmail.');
     }
 
-    final registered = await _api.rpc(
-      'check_email_exists',
-      params: {'email_input': email},
-    );
-    if (registered != true) {
-      await signOut();
+    if (!await _api.emailExists(email)) {
+      await _api.releaseGoogleAccount();
       throw const _GoogleLoginException('This email is not registered.');
     }
 
-    final idToken = account.authentication.idToken;
-    if (idToken == null) {
-      throw const AuthException('Missing Google ID token');
-    }
-
-    return _api.signInWithGoogle(idToken);
+    return _api.signInWithGoogle(identity.idToken);
   }
 
-  static String? messageFor(Object error, {required String fallback}) {
-    if (error is GoogleSignInException) {
-      debugPrint('Google error: ${error.code} | ${error.description}');
-    } else {
-      debugPrint('Sign in error: $error');
-    }
-
-    if (error is GoogleSignInException) {
-      if (error.code == GoogleSignInExceptionCode.canceled) return null;
+  static String messageFor(Object error, {required String fallback}) {
+    if (error is GatewayException && error.code.startsWith('google')) {
       return 'Google sign in failed. Please try again.';
     }
     if (error is _GoogleLoginException) return error.message;
@@ -88,114 +67,70 @@ class _GoogleAuth {
 }
 
 class SavedAccountStore {
-  static const String _key = 'saved_accounts';
   static const FlutterSecureStorage _vault = FlutterSecureStorage();
+  static final LocalDb _db = LocalDb.instance;
 
-  static Future<List<Map<String, dynamic>>> _read() async {
-    try {
-      final raw = await _vault.read(key: _key);
-      if (raw == null || raw.isEmpty) return [];
-      return (jsonDecode(raw) as List)
-          .map((item) => Map<String, dynamic>.from(item as Map))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
+  static String _vaultKey(String id) => 'account_password_$id';
 
-  static Future<void> _write(List<Map<String, dynamic>> accounts) {
-    return _vault.write(key: _key, value: jsonEncode(accounts));
-  }
+  static Future<List<Map<String, dynamic>>> load() => _db.savedAccounts();
 
-  static Future<void> _moveOldAccounts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final old = prefs.getStringList(_key);
-    if (old == null) return;
-
-    final accounts = await _read();
-    for (final item in old) {
-      final acc = jsonDecode(item) as Map<String, dynamic>;
-      final exists = accounts.any((a) => a['id'] == acc['id']);
-      if (!exists) accounts.add(acc);
-    }
-    await _write(accounts);
-    await prefs.remove(_key);
-  }
-
-  static DateTime _loginTime(Map<String, dynamic> acc) {
-    return DateTime.tryParse(acc['last_login'] ?? '') ?? DateTime(2000);
+  static Future<String?> password(String id) {
+    return _vault.read(key: _vaultKey(id));
   }
 
   static Future<String> _cacheAvatar(String url, String userId) async {
     if (url.isEmpty) return '';
     try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final dir = await getApplicationDocumentsDirectory();
-        final file = File('${dir.path}/avatar_$userId.jpg');
-        await file.writeAsBytes(response.bodyBytes);
-        return file.path;
-      }
-    } catch (_) {}
-    return '';
-  }
-
-  static Future<List<Map<String, dynamic>>> load() async {
-    try {
-      await _moveOldAccounts();
-    } catch (_) {}
-    final accounts = await _read();
-    accounts.sort((a, b) => _loginTime(b).compareTo(_loginTime(a)));
-    return accounts;
+      final response = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return '';
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/avatar_$userId.jpg');
+      await file.writeAsBytes(response.bodyBytes);
+      return file.path;
+    } catch (_) {
+      return '';
+    }
   }
 
   static Future<void> save({required User user, String? password}) async {
     try {
-      final accounts = await _read();
-      final hasPassword = accounts.any(
-        (a) => a['id'] == user.id && a['password'] != null,
-      );
+      final hasPassword = await _vault.containsKey(key: _vaultKey(user.id));
       if (password == null && hasPassword) {
-        await touch(user.id);
+        await _db.touchAccount(user.id);
         return;
       }
 
       final meta = user.userMetadata ?? {};
-      final email = (user.email ?? '').toLowerCase();
-      final avatarUrl =
-          (meta['profile_image'] ?? meta['avatar_url'] ?? meta['picture'] ?? '')
-              .toString();
+      final avatarUrl = _api.avatarUrl(
+        meta['profile_image'] ?? meta['avatar_url'] ?? meta['picture'],
+      );
 
-      accounts.removeWhere((a) => a['id'] == user.id || a['email'] == email);
-      accounts.add({
+      if (password != null) {
+        await _vault.write(key: _vaultKey(user.id), value: password);
+      }
+      await _db.saveAccount({
         'id': user.id,
-        'email': email,
+        'email': (user.email ?? '').toLowerCase(),
         'provider': password == null ? 'google' : 'password',
-        'password': password,
         'first_name': (meta['first_name'] ?? meta['name'] ?? 'User').toString(),
         'last_name': (meta['last_name'] ?? '').toString(),
         'avatar_url': avatarUrl,
         'local_avatar_path': await _cacheAvatar(avatarUrl, user.id),
-        'last_login': DateTime.now().toIso8601String(),
       });
-      await _write(accounts);
     } catch (_) {}
   }
 
   static Future<void> touch(String id) async {
-    final accounts = await _read();
-    for (final acc in accounts) {
-      if (acc['id'] == id) {
-        acc['last_login'] = DateTime.now().toIso8601String();
-      }
-    }
-    await _write(accounts);
+    try {
+      await _db.touchAccount(id);
+    } catch (_) {}
   }
 
   static Future<void> remove(String id) async {
-    final accounts = await _read();
-    accounts.removeWhere((a) => a['id'] == id);
-    await _write(accounts);
+    await _db.removeAccount(id);
+    await _vault.delete(key: _vaultKey(id));
   }
 }
 
@@ -433,15 +368,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
     try {
       final user = await _GoogleAuth.signIn();
+      if (user == null) return;
       await SavedAccountStore.save(user: user);
       await _enterHome(nav, user.id);
     } catch (e) {
-      await _GoogleAuth.signOut();
-      final message = _GoogleAuth.messageFor(
-        e,
-        fallback: 'Sign in failed. Please try again.',
+      await _api.releaseGoogleAccount();
+      _showSnack(
+        _GoogleAuth.messageFor(
+          e,
+          fallback: 'Sign in failed. Please try again.',
+        ),
       );
-      if (message != null) _showSnack(message);
     } finally {
       if (mounted) setState(() => _isGoogleLoading = false);
     }
@@ -762,10 +699,8 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     });
   }
 
-  String _getTimeAgo(String? timeStr) {
-    if (timeStr == null || timeStr.isEmpty) return 'Unknown';
-    final dt = DateTime.tryParse(timeStr);
-    if (dt == null) return 'Unknown';
+  String _getTimeAgo(int millis) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(millis);
     final diff = DateTime.now().difference(dt);
 
     if (diff.inSeconds < 60) return 'Just now';
@@ -812,7 +747,9 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     if (account['provider'] == 'google') {
       return _GoogleAuth.signIn(expectedEmail: account['email']);
     }
-    return _api.signIn(account['email'], account['password']);
+    final password = await SavedAccountStore.password(account['id']);
+    if (password == null) throw const GatewayException('password_missing');
+    return _api.signIn(account['email'], password);
   }
 
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
@@ -831,18 +768,23 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
 
     try {
       final user = await _authenticate(account);
-      if (user == null) throw const AuthException('No user returned');
+      if (user == null) {
+        nav.pop();
+        return;
+      }
 
       await SavedAccountStore.touch(account['id']);
       await _enterHome(nav, user.id);
     } catch (e) {
       nav.pop();
-      final message = _GoogleAuth.messageFor(
-        e,
-        fallback:
-            'Saved credentials expired or invalid. Please login manually.',
+      if (!mounted) return;
+      _showError(
+        _GoogleAuth.messageFor(
+          e,
+          fallback:
+              'Saved credentials expired or invalid. Please login manually.',
+        ),
       );
-      if (message != null && mounted) _showError(message);
     }
   }
 
@@ -928,7 +870,7 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                       : fullName;
                   final localAvatarPath = acc['local_avatar_path'] ?? '';
                   final avatarUrl = acc['avatar_url'] ?? '';
-                  final timeAgo = _getTimeAgo(acc['last_login']);
+                  final timeAgo = _getTimeAgo(acc['last_login'] as int);
                   final viaGoogle = acc['provider'] == 'google';
 
                   Widget avatarWidget;
@@ -1084,12 +1026,9 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
     });
 
     try {
-      final isValid = await _api.rpc(
-        'verify_code_for_email',
-        params: {'p_email': widget.email, 'p_code': code},
-      );
+      final isValid = await _api.verifyCode(widget.email, code);
 
-      if (isValid == true) {
+      if (isValid) {
         widget.onVerified();
         return;
       }

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../api_gateway.dart';
+import '../../../../local_db.dart';
 import '../../../../main.dart';
 import 'chat.dart';
 import 'profile/another_user.dart';
@@ -49,18 +50,7 @@ String _nameOf(Map<String, dynamic> u) {
 }
 
 String _avatarOf(Map<String, dynamic> u) {
-  final raw = u['avatar_url'];
-  if (raw is! String) return '';
-  final url = raw.trim();
-  if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
-    return '';
-  }
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  try {
-    return Supabase.instance.client.storage.from('avatars').getPublicUrl(url);
-  } catch (_) {
-    return url;
-  }
+  return ApiGateway.instance.avatarUrl(u['avatar_url']);
 }
 
 class _Preview {
@@ -150,6 +140,7 @@ class ChatPreviewScreen extends StatefulWidget {
 
 class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   final _gateway = ApiGateway.instance;
+  final _db = LocalDb.instance;
   final _presence = PresenceService.instance;
   final _search = TextEditingController();
   final _focus = FocusNode();
@@ -176,8 +167,8 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final visible =
-        // ignore: deprecated_member_use
-        (ModalRoute.of(context)?.isCurrent ?? true) && TickerMode.of(context);
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        TickerMode.valuesOf(context).enabled;
     if (_covered == !visible) return;
     _covered = !visible;
     _unlock?.cancel();
@@ -213,20 +204,11 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (_presence.connected.value) _fetch();
   }
 
-  Future<File> _localFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/chatpreview_$_me.json');
-  }
-
   Future<void> _loadLocal() async {
     if (_me.isEmpty) return;
     try {
-      final file = await _localFile();
-      if (!await file.exists()) return;
-      final rows = List<Map<String, dynamic>>.from(
-        jsonDecode(await file.readAsString()) as List,
-      );
-      if (!mounted) return;
+      final rows = await _db.chatPreviews(_me);
+      if (!mounted || rows.isEmpty) return;
       setState(() {
         _chats = rows.map((r) => _Preview.from(r, _me)).toList();
         _loading = false;
@@ -236,8 +218,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
 
   Future<void> _saveLocal(List<Map<String, dynamic>> rows) async {
     try {
-      final file = await _localFile();
-      await file.writeAsString(jsonEncode(rows), flush: true);
+      await _db.saveChatPreviews(_me, rows);
     } catch (_) {}
   }
 

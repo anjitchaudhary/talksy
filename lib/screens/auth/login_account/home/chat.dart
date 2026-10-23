@@ -8,9 +8,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../api_gateway.dart';
+import '../../../../local_db.dart';
 import '../../../../main.dart';
 
 const _months = [
@@ -92,18 +92,7 @@ String _nameOf(Map<String, dynamic> u) {
 }
 
 String _avatarOf(Map<String, dynamic> u) {
-  final raw = u['avatar_url'];
-  if (raw is! String) return '';
-  final url = raw.trim();
-  if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
-    return '';
-  }
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  try {
-    return Supabase.instance.client.storage.from('avatars').getPublicUrl(url);
-  } catch (_) {
-    return url;
-  }
+  return ApiGateway.instance.avatarUrl(u['avatar_url']);
 }
 
 bool _isUnsent(Map<String, dynamic> m) => m['is_unsent'] == true;
@@ -127,6 +116,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _focus = FocusNode();
   final _scroll = ScrollController();
   final _gateway = ApiGateway.instance;
+  final _db = LocalDb.instance;
   final _presence = PresenceService.instance;
   final _lastSeen = ValueNotifier<DateTime?>(null);
   final _notice = ValueNotifier<bool>(false);
@@ -194,52 +184,33 @@ class _ChatScreenState extends State<ChatScreen> {
     _fetchRemote();
   }
 
-  Future<File> _localFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/chat_${_me}_$_other.json');
-  }
-
-  Future<File> _meFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/profile_$_me.json');
-  }
-
   Future<void> _loadLocal() async {
     try {
-      final file = await _localFile();
-      if (!await file.exists()) return;
-      final list = jsonDecode(await file.readAsString()) as List;
-      if (!mounted) return;
+      final rows = await _db.messages(_me, _other);
+      if (!mounted || rows.isEmpty) return;
       setState(() {
-        _msgs = List<Map<String, dynamic>>.from(list);
+        _msgs = rows;
         _loading = false;
       });
     } catch (_) {}
   }
 
-  Future<void> _saveLocal() async {
+  Future<void> _saveLocal(List<Map<String, dynamic>> rows) async {
     try {
-      final file = await _localFile();
-      final saved = _msgs.where((m) => !_pending.contains(m['id'])).toList();
-      await file.writeAsString(jsonEncode(saved));
+      await _db.saveMessages(_me, _other, rows);
     } catch (_) {}
   }
 
   Future<void> _loadMe() async {
     if (_me.isEmpty) return;
     try {
-      final file = await _meFile();
-      if (await file.exists()) {
-        final saved = jsonDecode(await file.readAsString()) as Map;
-        if (mounted) {
-          setState(() => _meProfile = Map<String, dynamic>.from(saved));
-        }
-      }
+      final saved = await _db.profile(_me);
+      if (saved != null && mounted) setState(() => _meProfile = saved);
       unawaited(_ChatUserAvatar.fetch(_avatarOf(_meUser)));
 
       final row = await _gateway.fetchProfile(_me);
       if (row == null) return;
-      await file.writeAsString(jsonEncode(row));
+      await _db.saveProfile(_me, row);
       if (mounted) setState(() => _meProfile = row);
       unawaited(_ChatUserAvatar.fetch(_avatarOf(row)));
     } catch (_) {}
@@ -288,6 +259,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final queued = _msgs.where((m) => _pending.contains(m['id'])).toList();
     final known = _msgs.map((m) => m['id']).toSet();
+    final before = {for (final m in _msgs) m['id']: m};
+    final changed = data.where((m) => !mapEquals(before[m['id']], m)).toList();
     for (final row in data) {
       if (known.contains(row['id']) || row['sender_id'] != _me) continue;
       final i = queued.indexWhere((q) => q['message'] == row['message']);
@@ -300,7 +273,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _msgs = [...data, ...queued];
       _loading = false;
     });
-    _saveLocal();
+    _saveLocal(changed);
   }
 
   void _toBottom() {
@@ -396,7 +369,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _msgs.removeWhere((m) => m['id'] == tempId);
         if (!_msgs.any((m) => m['id'] == row['id'])) _msgs.add(row);
       });
-      _saveLocal();
+      _saveLocal([row]);
     } catch (_) {
       _pending.remove(tempId);
       if (!mounted) return;
@@ -425,8 +398,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final i = _msgs.indexWhere((m) => m['id'] == id);
     if (i == -1) return;
     final before = _msgs[i];
-    setState(() => _msgs[i] = {...before, ...changes});
-    _saveLocal();
+    final next = {...before, ...changes};
+    setState(() => _msgs[i] = next);
+    _saveLocal([next]);
 
     try {
       final ok = await action();
@@ -435,7 +409,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       final j = _msgs.indexWhere((m) => m['id'] == id);
       if (j != -1) setState(() => _msgs[j] = before);
-      _saveLocal();
+      _saveLocal([before]);
       _flashNotice();
     }
   }

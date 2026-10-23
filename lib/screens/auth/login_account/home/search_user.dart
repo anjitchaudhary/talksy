@@ -1,10 +1,9 @@
-import 'dart:convert';
-import 'dart:io';
+import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:talksy/api_gateway.dart';
+import 'package:talksy/local_db.dart';
 
 import 'profile/another_user.dart';
 
@@ -16,10 +15,15 @@ class SearchUserScreen extends StatefulWidget {
 }
 
 class _SearchUserScreenState extends State<SearchUserScreen> {
+  final ApiGateway _gateway = ApiGateway.instance;
+  final LocalDb _db = LocalDb.instance;
   final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _searchHistory = [];
   bool _isSearching = false;
+  Timer? _debounce;
+
+  String get _owner => _gateway.currentUser?.id ?? 'guest';
 
   @override
   void initState() {
@@ -30,12 +34,14 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
     super.dispose();
   }
 
   void _onSearchChanged() {
+    _debounce?.cancel();
     final query = _searchController.text.trim();
     if (query.isEmpty) {
       setState(() {
@@ -44,127 +50,75 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
       });
       return;
     }
-    _performSearch(query);
-  }
-
-  Future<File> _getHistoryFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
-    return File('${dir.path}/search_user_history_$userId.json');
+    setState(() => _isSearching = true);
+    _debounce = Timer(
+      const Duration(milliseconds: 300),
+      () => _performSearch(query),
+    );
   }
 
   Future<void> _loadSearchHistory() async {
     try {
-      final file = await _getHistoryFile();
-      if (await file.exists()) {
-        final content = await file.readAsString();
-        final List<dynamic> data = jsonDecode(content);
-        if (mounted) {
-          setState(() {
-            _searchHistory = data.cast<Map<String, dynamic>>();
-          });
-        }
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _saveSearchHistory() async {
-    try {
-      final file = await _getHistoryFile();
-      await file.writeAsString(jsonEncode(_searchHistory));
+      final rows = await _db.searchHistory(_owner);
+      if (mounted) setState(() => _searchHistory = rows);
     } catch (_) {}
   }
 
   Future<void> _addToHistory(Map<String, dynamic> user) async {
-    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
-    if (user['id'] == currentUserId) return;
-    _searchHistory.removeWhere((item) => item['id'] == user['id']);
-    _searchHistory.insert(0, user);
-    await _saveSearchHistory();
-    if (mounted) setState(() {});
+    try {
+      await _db.addSearch(_owner, user);
+      await _loadSearchHistory();
+    } catch (_) {}
+  }
+
+  Future<bool> _confirm() async {
+    final confirmed = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Are you sure to apply this action?'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
   }
 
   Future<void> _removeHistoryItem(String id) async {
-    final confirmed = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: const Text('Are you sure to apply this action?'),
-        actions: [
-          CupertinoDialogAction(
-            isDestructiveAction: false,
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Yes'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      _searchHistory.removeWhere((item) => item['id'] == id);
-      await _saveSearchHistory();
-      if (mounted) setState(() {});
-    }
+    if (!await _confirm()) return;
+    try {
+      await _db.removeSearch(_owner, id);
+      await _loadSearchHistory();
+    } catch (_) {}
   }
 
   Future<void> _clearAllHistory() async {
-    final confirmed = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: const Text('Are you sure to apply this action?'),
-        actions: [
-          CupertinoDialogAction(
-            isDestructiveAction: false,
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Yes'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      _searchHistory.clear();
-      await _saveSearchHistory();
-      if (mounted) setState(() {});
-    }
+    if (!await _confirm()) return;
+    try {
+      await _db.clearSearches(_owner);
+      await _loadSearchHistory();
+    } catch (_) {}
   }
 
   Future<void> _performSearch(String query) async {
-    setState(() => _isSearching = true);
+    List<Map<String, dynamic>> rows = [];
     try {
-      final currentUserId = Supabase.instance.client.auth.currentUser?.id;
-      final response = await Supabase.instance.client
-          .from('profiles')
-          .select('id, first_name, last_name, display_name, email, avatar_url')
-          .neq('id', currentUserId ?? '')
-          .or(
-            'first_name.ilike.%$query%,last_name.ilike.%$query%,display_name.ilike.%$query%',
-          )
-          .limit(20);
+      rows = await _gateway.searchProfiles(query);
+    } catch (_) {}
 
-      if (mounted) {
-        setState(() {
-          _searchResults = List<Map<String, dynamic>>.from(response);
-          _isSearching = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _searchResults = [];
-          _isSearching = false;
-        });
-      }
-    }
+    if (!mounted || query != _searchController.text.trim()) return;
+    setState(() {
+      _searchResults = rows;
+      _isSearching = false;
+    });
   }
 
   void _navigateToProfile(Map<String, dynamic> user) {
@@ -383,27 +337,11 @@ class _UserAvatar extends StatelessWidget {
 
   const _UserAvatar({this.url, required this.isDark});
 
-  String _resolveUrl(String rawUrl) {
-    final trimmed = rawUrl.trim();
-    if (trimmed.isEmpty) return '';
-    if (trimmed.startsWith('/') || trimmed.contains('data/user')) return '';
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      return trimmed;
-    }
-    try {
-      return Supabase.instance.client.storage
-          .from('avatars')
-          .getPublicUrl(trimmed);
-    } catch (_) {
-      return trimmed;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     const Color silverColor = Color(0xFFC0C0C0);
     final bgBase = isDark ? const Color(0xFF222222) : const Color(0xFFECECEC);
-    final resolvedUrl = url != null ? _resolveUrl(url!) : '';
+    final resolvedUrl = ApiGateway.instance.avatarUrl(url);
 
     return Container(
       width: 32,

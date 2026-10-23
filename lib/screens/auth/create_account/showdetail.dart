@@ -121,7 +121,11 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       } catch (_) {}
 
       final imageUrl = await _uploadProfileImage();
-      if (imageUrl != null) await _api.saveAvatar(imageUrl);
+      if (imageUrl != null) {
+        try {
+          await _api.saveAvatar(imageUrl);
+        } catch (_) {}
+      }
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('otp_verified_${user.id}', true);
