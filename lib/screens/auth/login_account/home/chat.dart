@@ -31,6 +31,7 @@ const _months = [
 const _grey = Color(0xFF8E8E93);
 const _subStyle = TextStyle(fontSize: 10, height: 1.1, color: _grey);
 const _noNetMsg = 'Your connection is either slow or no connection!';
+const _sendFailedMsg = 'Message could not be sent. Please try again.';
 
 const unsentLabel = 'Message is unsent';
 const _reactions = ['😡', '😩', '😭', '😅', '❤️', '👍'];
@@ -119,7 +120,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _db = LocalDb.instance;
   final _presence = PresenceService.instance;
   final _lastSeen = ValueNotifier<DateTime?>(null);
-  final _notice = ValueNotifier<bool>(false);
+  final _notice = ValueNotifier<String?>(null);
   final _pending = <String>{};
 
   List<Map<String, dynamic>> _msgs = [];
@@ -201,6 +202,12 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {}
   }
 
+  Future<void> _replaceLocal(List<Map<String, dynamic>> rows) async {
+    try {
+      await _db.replaceMessages(_me, _other, rows);
+    } catch (_) {}
+  }
+
   Future<void> _loadMe() async {
     if (_me.isEmpty) return;
     try {
@@ -239,7 +246,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _fetchRemote() async {
     try {
       final res = await _gateway.fetchMessages(_me, _other);
-      _onMessages(res);
+      _onMessages(res, replace: true);
     } catch (_) {
       if (mounted && _loading) setState(() => _loading = false);
     }
@@ -251,7 +258,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {}
   }
 
-  void _onMessages(List<Map<String, dynamic>> data) {
+  void _onMessages(List<Map<String, dynamic>> data, {bool replace = false}) {
     if (data.any((m) => m['receiver_id'] == _me && m['status'] != 'seen')) {
       _markSeen();
     }
@@ -273,7 +280,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _msgs = [...data, ...queued];
       _loading = false;
     });
-    _saveLocal(changed);
+    if (replace) {
+      _replaceLocal(data);
+    } else {
+      _saveLocal(changed);
+    }
   }
 
   void _toBottom() {
@@ -285,11 +296,11 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _flashNotice() {
+  void _flashNotice([String text = _noNetMsg]) {
     _noticeTimer?.cancel();
-    _notice.value = true;
+    _notice.value = text;
     _noticeTimer = Timer(const Duration(seconds: 2), () {
-      _notice.value = false;
+      _notice.value = null;
     });
   }
 
@@ -370,7 +381,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (!_msgs.any((m) => m['id'] == row['id'])) _msgs.add(row);
       });
       _saveLocal([row]);
-    } catch (_) {
+    } catch (e) {
       _pending.remove(tempId);
       if (!mounted) return;
       setState(() {
@@ -381,7 +392,7 @@ class _ChatScreenState extends State<ChatScreen> {
         text: text,
         selection: TextSelection.collapsed(offset: text.length),
       );
-      _flashNotice();
+      _flashNotice(e is GatewayException ? _sendFailedMsg : _noNetMsg);
     }
   }
 
@@ -945,37 +956,47 @@ class _PresenceLine extends StatelessWidget {
   }
 }
 
-class _Notice extends StatelessWidget {
-  final ValueListenable<bool> show;
+class _Notice extends StatefulWidget {
+  final ValueListenable<String?> show;
 
   const _Notice({required this.show});
 
   @override
+  State<_Notice> createState() => _NoticeState();
+}
+
+class _NoticeState extends State<_Notice> {
+  String _text = _noNetMsg;
+
+  @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: show,
-      builder: (context, on, child) {
+    return ValueListenableBuilder<String?>(
+      valueListenable: widget.show,
+      builder: (context, text, _) {
+        if (text != null) _text = text;
         return IgnorePointer(
           child: AnimatedOpacity(
-            opacity: on ? 1 : 0,
+            opacity: text == null ? 0 : 1,
             duration: const Duration(milliseconds: 180),
-            child: child,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xE62C2C2E),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  _text,
+                  style: const TextStyle(fontSize: 11, color: Colors.white),
+                ),
+              ),
+            ),
           ),
         );
       },
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xE62C2C2E),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: const Text(
-            _noNetMsg,
-            style: TextStyle(fontSize: 11, color: Colors.white),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -1506,6 +1527,41 @@ class ReceivedSlider extends StatelessWidget {
           ),
           const _SliderDivider(),
           _SliderRow(icon: Icons.reply_rounded, label: 'Reply', onTap: onReply),
+        ],
+      ),
+    );
+  }
+}
+
+class PreviewSlider extends StatelessWidget {
+  final VoidCallback onArchive;
+  final VoidCallback onDelete;
+
+  const PreviewSlider({
+    super.key,
+    required this.onArchive,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _SliderBox(
+      width: 210,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _SliderRow(
+            icon: Icons.archive_outlined,
+            label: 'Archive',
+            onTap: onArchive,
+          ),
+          const _SliderDivider(),
+          _SliderRow(
+            icon: Icons.delete_outline_rounded,
+            label: 'Delete',
+            onTap: onDelete,
+            danger: true,
+          ),
         ],
       ),
     );

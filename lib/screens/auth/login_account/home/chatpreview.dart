@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -51,6 +52,11 @@ String _nameOf(Map<String, dynamic> u) {
 
 String _avatarOf(Map<String, dynamic> u) {
   return ApiGateway.instance.avatarUrl(u['avatar_url']);
+}
+
+Rect _rectOf(BuildContext context) {
+  final box = context.findRenderObject() as RenderBox;
+  return box.localToGlobal(Offset.zero) & box.size;
 }
 
 class _Preview {
@@ -278,6 +284,62 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     _fetch();
   }
 
+  void _onHold(_Preview chat, Rect anchor) {
+    HapticFeedback.mediumImpact();
+    showSlider(
+      context: context,
+      anchor: anchor,
+      alignRight: false,
+      child: PreviewSlider(
+        onArchive: () {},
+        onDelete: () => _confirmDelete(chat),
+      ),
+    );
+  }
+
+  Future<void> _confirmDelete(_Preview chat) async {
+    final yes = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Are you sure to delete?'),
+        content: const Text('Chat history will be deleted.'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    if (yes == true && mounted) await _delete(chat);
+  }
+
+  Future<void> _delete(_Preview chat) async {
+    setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
+    try {
+      await _gateway.deleteChat(chat.id);
+      await _wipeLocal(chat.id);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not delete chat. Try again.')),
+        );
+      }
+    }
+    if (mounted) _fetch();
+  }
+
+  Future<void> _wipeLocal(String peer) async {
+    try {
+      await _db.deleteChat(_me, peer);
+    } catch (_) {}
+  }
+
   Future<void> _openProfile(_Preview chat) async {
     await Navigator.push(
       context,
@@ -378,6 +440,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
           chat: chat,
           isDark: dark,
           onTap: () => _open(chat),
+          onHold: (rect) => _onHold(chat, rect),
           onAvatarTap: () => _openProfile(chat),
         );
       },
@@ -428,6 +491,7 @@ class _PreviewTile extends StatelessWidget {
   final _Preview chat;
   final bool isDark;
   final VoidCallback onTap;
+  final ValueChanged<Rect> onHold;
   final VoidCallback onAvatarTap;
 
   const _PreviewTile({
@@ -435,6 +499,7 @@ class _PreviewTile extends StatelessWidget {
     required this.chat,
     required this.isDark,
     required this.onTap,
+    required this.onHold,
     required this.onAvatarTap,
   });
 
@@ -451,6 +516,8 @@ class _PreviewTile extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
+      onLongPress: () => onHold(_rectOf(context)),
+      enableFeedback: false,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(

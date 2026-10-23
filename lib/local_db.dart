@@ -157,25 +157,75 @@ class LocalDb {
     final db = await _database;
     final batch = db.batch();
     for (final m in rows) {
-      final created = (m['created_at'] ?? '').toString();
-      batch.insert('messages', <String, Object?>{
-        'owner': owner,
-        'peer': peer,
-        'id': m['id'].toString(),
-        'sender_id': m['sender_id'].toString(),
-        'receiver_id': m['receiver_id'].toString(),
-        'message': (m['message'] ?? '').toString(),
-        'status': (m['status'] ?? 'sent').toString(),
-        'reply_to': m['reply_to']?.toString(),
-        'is_unsent': m['is_unsent'] == true ? 1 : 0,
-        'is_edited': m['is_edited'] == true ? 1 : 0,
-        'reaction': m['reaction']?.toString(),
-        'reacted_at': m['reacted_at']?.toString(),
-        'created_at': created,
-        'created_ms': DateTime.tryParse(created)?.millisecondsSinceEpoch ?? 0,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      batch.insert(
+        'messages',
+        _messageRow(owner, peer, m),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     }
     await batch.commit(noResult: true);
+  }
+
+  Future<void> replaceMessages(
+    String owner,
+    String peer,
+    List<Map<String, dynamic>> rows,
+  ) async {
+    final db = await _database;
+    final batch = db.batch();
+    batch.delete(
+      'messages',
+      where: 'owner = ? AND peer = ?',
+      whereArgs: [owner, peer],
+    );
+    for (final m in rows) {
+      batch.insert(
+        'messages',
+        _messageRow(owner, peer, m),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  Future<void> deleteChat(String owner, String peer) async {
+    final db = await _database;
+    final batch = db.batch();
+    batch.delete(
+      'messages',
+      where: 'owner = ? AND peer = ?',
+      whereArgs: [owner, peer],
+    );
+    batch.delete(
+      'chat_previews',
+      where: 'owner = ? AND id = ?',
+      whereArgs: [owner, peer],
+    );
+    await batch.commit(noResult: true);
+  }
+
+  Map<String, Object?> _messageRow(
+    String owner,
+    String peer,
+    Map<String, dynamic> m,
+  ) {
+    final created = (m['created_at'] ?? '').toString();
+    return <String, Object?>{
+      'owner': owner,
+      'peer': peer,
+      'id': m['id'].toString(),
+      'sender_id': m['sender_id'].toString(),
+      'receiver_id': m['receiver_id'].toString(),
+      'message': (m['message'] ?? '').toString(),
+      'status': (m['status'] ?? 'sent').toString(),
+      'reply_to': m['reply_to']?.toString(),
+      'is_unsent': m['is_unsent'] == true ? 1 : 0,
+      'is_edited': m['is_edited'] == true ? 1 : 0,
+      'reaction': m['reaction']?.toString(),
+      'reacted_at': m['reacted_at']?.toString(),
+      'created_at': created,
+      'created_ms': DateTime.tryParse(created)?.millisecondsSinceEpoch ?? 0,
+    };
   }
 
   Map<String, dynamic> _readMessage(Map<String, Object?> r) {

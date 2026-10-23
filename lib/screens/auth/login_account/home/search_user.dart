@@ -15,59 +15,102 @@ class SearchUserScreen extends StatefulWidget {
 }
 
 class _SearchUserScreenState extends State<SearchUserScreen> {
+  static const Duration _debounceDelay = Duration(milliseconds: 350);
+  static const int _maxQueryLength = 50;
+
   final ApiGateway _gateway = ApiGateway.instance;
   final LocalDb _db = LocalDb.instance;
-  final TextEditingController _searchController = TextEditingController();
-  List<Map<String, dynamic>> _searchResults = [];
-  List<Map<String, dynamic>> _searchHistory = [];
+  final TextEditingController _controller = TextEditingController();
+
+  List<Map<String, dynamic>> _results = [];
+  List<Map<String, dynamic>> _history = [];
   bool _isSearching = false;
+  bool _hasError = false;
   Timer? _debounce;
 
   String get _owner => _gateway.currentUser?.id ?? 'guest';
 
+  String get _query {
+    final text = _controller.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return String.fromCharCodes(text.runes.take(_maxQueryLength)).trim();
+  }
+
   @override
   void initState() {
     super.initState();
-    _loadSearchHistory();
-    _searchController.addListener(_onSearchChanged);
+    _controller.addListener(_onQueryChanged);
+    _loadHistory();
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
-    _searchController.removeListener(_onSearchChanged);
-    _searchController.dispose();
+    _controller.removeListener(_onQueryChanged);
+    _controller.dispose();
     super.dispose();
   }
 
-  void _onSearchChanged() {
+  void _onQueryChanged() {
     _debounce?.cancel();
-    final query = _searchController.text.trim();
+    final query = _query;
     if (query.isEmpty) {
       setState(() {
-        _searchResults = [];
+        _results = [];
         _isSearching = false;
+        _hasError = false;
       });
       return;
     }
-    setState(() => _isSearching = true);
-    _debounce = Timer(
-      const Duration(milliseconds: 300),
-      () => _performSearch(query),
-    );
+    setState(() {
+      _isSearching = true;
+      _hasError = false;
+    });
+    _debounce = Timer(_debounceDelay, () => _search(query));
   }
 
-  Future<void> _loadSearchHistory() async {
+  Future<void> _search(String query) async {
+    var rows = <Map<String, dynamic>>[];
+    var failed = false;
+    try {
+      rows = await _gateway.searchProfiles(query);
+    } catch (_) {
+      failed = true;
+    }
+    if (!mounted || query != _query) return;
+    setState(() {
+      _results = rows;
+      _hasError = failed;
+      _isSearching = false;
+    });
+  }
+
+  Future<void> _loadHistory() async {
     try {
       final rows = await _db.searchHistory(_owner);
-      if (mounted) setState(() => _searchHistory = rows);
+      if (mounted) setState(() => _history = rows);
     } catch (_) {}
   }
 
-  Future<void> _addToHistory(Map<String, dynamic> user) async {
+  Future<void> _saveToHistory(Map<String, dynamic> user) async {
     try {
       await _db.addSearch(_owner, user);
-      await _loadSearchHistory();
+      await _loadHistory();
+    } catch (_) {}
+  }
+
+  Future<void> _removeFromHistory(String id) async {
+    if (!await _confirm()) return;
+    try {
+      await _db.removeSearch(_owner, id);
+      await _loadHistory();
+    } catch (_) {}
+  }
+
+  Future<void> _clearHistory() async {
+    if (!await _confirm()) return;
+    try {
+      await _db.clearSearches(_owner);
+      await _loadHistory();
     } catch (_) {}
   }
 
@@ -92,37 +135,9 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
     return confirmed == true;
   }
 
-  Future<void> _removeHistoryItem(String id) async {
-    if (!await _confirm()) return;
-    try {
-      await _db.removeSearch(_owner, id);
-      await _loadSearchHistory();
-    } catch (_) {}
-  }
-
-  Future<void> _clearAllHistory() async {
-    if (!await _confirm()) return;
-    try {
-      await _db.clearSearches(_owner);
-      await _loadSearchHistory();
-    } catch (_) {}
-  }
-
-  Future<void> _performSearch(String query) async {
-    List<Map<String, dynamic>> rows = [];
-    try {
-      rows = await _gateway.searchProfiles(query);
-    } catch (_) {}
-
-    if (!mounted || query != _searchController.text.trim()) return;
-    setState(() {
-      _searchResults = rows;
-      _isSearching = false;
-    });
-  }
-
-  void _navigateToProfile(Map<String, dynamic> user) {
-    _addToHistory(user);
+  void _openProfile(Map<String, dynamic> user) {
+    FocusScope.of(context).unfocus();
+    _saveToHistory(user);
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -131,248 +146,330 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
     );
   }
 
+  String _nameOf(Map<String, dynamic> user) {
+    final first = (user['first_name'] ?? '').toString().trim();
+    final last = (user['last_name'] ?? '').toString().trim();
+    final display = (user['display_name'] ?? '').toString().trim();
+    final email = (user['email'] ?? '').toString().trim();
+
+    final full = '$first $last'.trim();
+    if (full.isNotEmpty) return full;
+    if (display.isNotEmpty) return display;
+    if (email.isNotEmpty) return email.split('@').first;
+    return 'Unknown User';
+  }
+
+  String get _emptyMessage {
+    if (_hasError) return 'Could not search right now';
+    return _query.isEmpty ? 'No recent searches' : 'No users found';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bgColor = isDark ? const Color(0xFF121212) : Colors.white;
-    final borderColor = isDark
-        ? const Color(0xFF2C2C2C)
-        : const Color(0xFFE5E5E5);
-    final textColor = isDark ? Colors.white : Colors.black;
-    final subtitleColor = isDark ? Colors.grey : Colors.black54;
-
-    final displayList = _searchController.text.trim().isEmpty
-        ? _searchHistory
-        : _searchResults;
+    final palette = _Palette.of(
+      Theme.of(context).brightness == Brightness.dark,
+    );
+    final showingHistory = _query.isEmpty;
+    final items = showingHistory ? _history : _results;
 
     return Scaffold(
-      backgroundColor: bgColor,
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(48.5),
-        child: AppBar(
-          backgroundColor: bgColor,
-          elevation: 0,
-          automaticallyImplyLeading: false,
-          centerTitle: true,
-          titleSpacing: 0,
-          leading: Center(
-            child: CupertinoButton(
-              padding: EdgeInsets.zero,
-              minimumSize: const Size(32, 32),
-              onPressed: () => Navigator.pop(context),
-              child: Icon(
-                Icons.arrow_back_ios_new,
-                size: 20,
-                color: isDark ? Colors.white : Colors.black87,
-              ),
-            ),
-          ),
-          bottom: PreferredSize(
-            preferredSize: const Size.fromHeight(0.5),
-            child: Container(height: 0.5, color: borderColor),
-          ),
-          title: Text(
-            'Search users to connect',
-            style: TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.normal,
-              color: textColor,
+      backgroundColor: palette.background,
+      appBar: _buildAppBar(palette),
+      body: Column(
+        children: [
+          _buildSearchField(palette),
+          if (showingHistory && _history.isNotEmpty)
+            _buildHistoryHeader(palette),
+          Expanded(child: _buildBody(palette, items, showingHistory)),
+        ],
+      ),
+    );
+  }
+
+  PreferredSizeWidget _buildAppBar(_Palette palette) {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(48.5),
+      child: AppBar(
+        backgroundColor: palette.background,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        centerTitle: true,
+        titleSpacing: 0,
+        leading: Center(
+          child: CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(32, 32),
+            onPressed: () => Navigator.pop(context),
+            child: Icon(
+              Icons.arrow_back_ios_new,
+              size: 20,
+              color: palette.icon,
             ),
           ),
         ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(0.5),
+          child: Container(height: 0.5, color: palette.border),
+        ),
+        title: Text(
+          'Search users to connect',
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.normal,
+            color: palette.text,
+          ),
+        ),
       ),
-      body: Column(
+    );
+  }
+
+  Widget _buildSearchField(_Palette palette) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: CupertinoSearchTextField(
+        controller: _controller,
+        placeholder: 'Search by name...',
+        autocorrect: false,
+        backgroundColor: palette.field,
+        prefixIcon: Icon(Icons.search, color: palette.subtitle, size: 20),
+        suffixIcon: Icon(Icons.clear, color: palette.subtitle, size: 20),
+        style: TextStyle(color: palette.text),
+        placeholderStyle: TextStyle(color: palette.subtitle),
+      ),
+    );
+  }
+
+  Widget _buildHistoryHeader(_Palette palette) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            child: CupertinoSearchTextField(
-              controller: _searchController,
-              placeholder: 'Search by name...',
-              backgroundColor: isDark
-                  ? const Color(0xFF222222)
-                  : const Color(0xFFF0F0F0),
-              prefixIcon: Icon(Icons.search, color: subtitleColor, size: 20),
-              suffixIcon: Icon(Icons.clear, color: subtitleColor, size: 20),
-              style: TextStyle(color: textColor),
-              placeholderStyle: TextStyle(color: subtitleColor),
+          Text(
+            'Recent Searches',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: palette.subtitle,
             ),
           ),
-          if (_searchController.text.trim().isEmpty &&
-              _searchHistory.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Recent Searches',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: subtitleColor,
-                    ),
-                  ),
-                  CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    minimumSize: const Size(30, 30),
-                    onPressed: _clearAllHistory,
-                    child: Text(
-                      'Clear All',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: CupertinoColors.activeBlue,
-                      ),
-                    ),
-                  ),
-                ],
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(30, 30),
+            onPressed: _clearHistory,
+            child: const Text(
+              'Clear All',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: CupertinoColors.activeBlue,
               ),
             ),
-          if (_isSearching)
-            const Expanded(child: Center(child: CupertinoActivityIndicator()))
-          else if (displayList.isEmpty)
-            Expanded(
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: isDark
-                            ? const Color(0xFF1E1E1E)
-                            : const Color(0xFFF4F4F4),
-                        border: Border.all(color: borderColor, width: 1),
-                      ),
-                      child: Icon(Icons.search, size: 26, color: subtitleColor),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      'No users searched',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: subtitleColor,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.separated(
-                itemCount: displayList.length,
-                separatorBuilder: (context, index) =>
-                    Container(height: 0.5, color: borderColor),
-                itemBuilder: (context, index) {
-                  final user = displayList[index];
-                  final firstName = user['first_name'] ?? '';
-                  final lastName = user['last_name'] ?? '';
-                  final displayName = user['display_name'] ?? '';
-                  final email = user['email'] ?? '';
+          ),
+        ],
+      ),
+    );
+  }
 
-                  String fullName = '$firstName $lastName'.trim();
-                  if (fullName.isEmpty) {
-                    fullName = displayName.isNotEmpty
-                        ? displayName
-                        : (email.isNotEmpty
-                              ? email.split('@').first
-                              : 'Unknown User');
-                  }
+  Widget _buildBody(
+    _Palette palette,
+    List<Map<String, dynamic>> items,
+    bool showingHistory,
+  ) {
+    if (_isSearching) {
+      return const Center(child: CupertinoActivityIndicator());
+    }
+    if (items.isEmpty) return _buildEmpty(palette);
 
-                  final avatarUrl = user['avatar_url'] as String?;
+    return ListView.separated(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      itemCount: items.length,
+      separatorBuilder: (context, index) =>
+          Container(height: 0.5, color: palette.border),
+      itemBuilder: (context, index) {
+        final user = items[index];
+        return _UserTile(
+          name: _nameOf(user),
+          avatarUrl: user['avatar_url'] as String?,
+          palette: palette,
+          onTap: () => _openProfile(user),
+          onRemove: showingHistory
+              ? () => _removeFromHistory(user['id'].toString())
+              : null,
+        );
+      },
+    );
+  }
 
-                  return CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () => _navigateToProfile(user),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                      color: Colors.transparent,
-                      child: Row(
-                        children: [
-                          _UserAvatar(url: avatarUrl, isDark: isDark),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              fullName,
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w500,
-                                color: textColor,
-                              ),
-                            ),
-                          ),
-                          if (_searchController.text.trim().isEmpty)
-                            CupertinoButton(
-                              padding: EdgeInsets.zero,
-                              minimumSize: const Size(24, 24),
-                              onPressed: () => _removeHistoryItem(user['id']),
-                              child: Icon(
-                                Icons.close,
-                                size: 18,
-                                color: subtitleColor,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
+  Widget _buildEmpty(_Palette palette) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: palette.emptyBadge,
+              border: Border.all(color: palette.border, width: 1),
             ),
+            child: Icon(Icons.search, size: 26, color: palette.subtitle),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _emptyMessage,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: palette.subtitle,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _UserAvatar extends StatelessWidget {
-  final String? url;
-  final bool isDark;
+class _Palette {
+  final Color background;
+  final Color border;
+  final Color text;
+  final Color subtitle;
+  final Color icon;
+  final Color field;
+  final Color emptyBadge;
+  final Color avatarBackground;
+  final Color avatarBorder;
+  final Color avatarIcon;
 
-  const _UserAvatar({this.url, required this.isDark});
+  const _Palette({
+    required this.background,
+    required this.border,
+    required this.text,
+    required this.subtitle,
+    required this.icon,
+    required this.field,
+    required this.emptyBadge,
+    required this.avatarBackground,
+    required this.avatarBorder,
+    required this.avatarIcon,
+  });
+
+  factory _Palette.of(bool isDark) {
+    const silver = Color(0xFFC0C0C0);
+    return isDark
+        ? _Palette(
+            background: const Color(0xFF121212),
+            border: const Color(0xFF2C2C2C),
+            text: Colors.white,
+            subtitle: Colors.grey,
+            icon: Colors.white,
+            field: const Color(0xFF222222),
+            emptyBadge: const Color(0xFF1E1E1E),
+            avatarBackground: const Color(0xFF222222),
+            avatarBorder: silver.withValues(alpha: 0.5),
+            avatarIcon: Colors.white70,
+          )
+        : const _Palette(
+            background: Colors.white,
+            border: Color(0xFFE5E5E5),
+            text: Colors.black,
+            subtitle: Colors.black54,
+            icon: Colors.black87,
+            field: Color(0xFFF0F0F0),
+            emptyBadge: Color(0xFFF4F4F4),
+            avatarBackground: Color(0xFFECECEC),
+            avatarBorder: silver,
+            avatarIcon: Colors.black54,
+          );
+  }
+}
+
+class _UserTile extends StatelessWidget {
+  final String name;
+  final String? avatarUrl;
+  final _Palette palette;
+  final VoidCallback onTap;
+  final VoidCallback? onRemove;
+
+  const _UserTile({
+    required this.name,
+    required this.avatarUrl,
+    required this.palette,
+    required this.onTap,
+    this.onRemove,
+  });
 
   @override
   Widget build(BuildContext context) {
-    const Color silverColor = Color(0xFFC0C0C0);
-    final bgBase = isDark ? const Color(0xFF222222) : const Color(0xFFECECEC);
-    final resolvedUrl = ApiGateway.instance.avatarUrl(url);
-
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: bgBase,
-        border: Border.all(
-          color: isDark ? silverColor.withValues(alpha: 0.5) : silverColor,
-          width: 1,
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      onPressed: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        color: Colors.transparent,
+        child: Row(
+          children: [
+            _UserAvatar(url: avatarUrl, palette: palette),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                  color: palette.text,
+                ),
+              ),
+            ),
+            if (onRemove != null)
+              CupertinoButton(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(24, 24),
+                onPressed: onRemove,
+                child: Icon(Icons.close, size: 18, color: palette.subtitle),
+              ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _UserAvatar extends StatelessWidget {
+  static const double _size = 32;
+
+  final String? url;
+  final _Palette palette;
+
+  const _UserAvatar({required this.url, required this.palette});
+
+  @override
+  Widget build(BuildContext context) {
+    final resolved = ApiGateway.instance.avatarUrl(url);
+    final placeholder = Icon(Icons.person, size: 18, color: palette.avatarIcon);
+
+    return Container(
+      width: _size,
+      height: _size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: palette.avatarBackground,
+        border: Border.all(color: palette.avatarBorder, width: 1),
+      ),
       child: ClipOval(
-        child: resolvedUrl.isEmpty
-            ? Icon(
-                Icons.person,
-                size: 18,
-                color: isDark ? Colors.white70 : Colors.black54,
-              )
+        child: resolved.isEmpty
+            ? placeholder
             : Image.network(
-                resolvedUrl,
-                width: 32,
-                height: 32,
+                resolved,
+                width: _size,
+                height: _size,
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => Icon(
-                  Icons.person,
-                  size: 18,
-                  color: isDark ? Colors.white70 : Colors.black54,
-                ),
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
+                errorBuilder: (context, error, stackTrace) => placeholder,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
                   return const Center(
                     child: CupertinoActivityIndicator(radius: 7),
                   );

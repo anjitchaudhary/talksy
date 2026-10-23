@@ -26,6 +26,7 @@ class ApiGateway {
   static final ApiGateway instance = ApiGateway._();
 
   static const Duration _timeout = Duration(seconds: 20);
+  static const int _searchLimit = 20;
 
   SupabaseClient get _db => Supabase.instance.client;
 
@@ -221,19 +222,22 @@ class ApiGateway {
     required String status,
     String? replyTo,
   }) async {
-    final res = await _db
-        .from('messages')
-        .insert({
-          'sender_id': senderId,
-          'receiver_id': receiverId,
-          'message': message,
-          'status': status,
-          ...?replyTo == null ? null : {'reply_to': replyTo},
-        })
-        .select()
-        .single()
-        .timeout(_timeout);
-    return res;
+    try {
+      return await _db
+          .from('messages')
+          .insert({
+            'sender_id': senderId,
+            'receiver_id': receiverId,
+            'message': message,
+            'status': status,
+            ...?replyTo == null ? null : {'reply_to': replyTo},
+          })
+          .select()
+          .single()
+          .timeout(_timeout);
+    } on PostgrestException catch (e) {
+      throw GatewayException('send_rejected:${e.code}');
+    }
   }
 
   Future<void> markSeen(String senderId) async {
@@ -266,6 +270,10 @@ class ApiGateway {
     return List<Map<String, dynamic>>.from(res as List);
   }
 
+  Future<void> deleteChat(String partnerId) async {
+    await rpc('delete_chat', params: {'p_partner': partnerId});
+  }
+
   String avatarUrl(Object? raw) {
     if (raw is! String) return '';
     final url = raw.trim();
@@ -281,24 +289,14 @@ class ApiGateway {
   }
 
   Future<List<Map<String, dynamic>>> searchProfiles(String query) async {
-    final me = currentUser?.id;
-    final term = query
-        .replaceAll(RegExp(r'[^\p{L}\p{N} ]', unicode: true), ' ')
-        .trim();
-    if (me == null || term.isEmpty) return [];
+    final term = query.trim();
+    if (currentUser == null || term.isEmpty) return [];
 
-    final rows = await _db
-        .from('profiles')
-        .select('id, first_name, last_name, display_name, email, avatar_url')
-        .neq('id', me)
-        .or(
-          'first_name.ilike.%$term%,'
-          'last_name.ilike.%$term%,'
-          'display_name.ilike.%$term%',
-        )
-        .limit(20)
-        .timeout(_timeout);
-    return List<Map<String, dynamic>>.from(rows);
+    final rows = await rpc(
+      'search_profiles',
+      params: {'p_query': term, 'p_limit': _searchLimit},
+    );
+    return List<Map<String, dynamic>>.from(rows as List);
   }
 
   Future<Map<String, dynamic>?> fetchProfile(String userId) async {
