@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:talksy/api_gateway.dart';
@@ -15,7 +13,6 @@ class SearchUserScreen extends StatefulWidget {
 }
 
 class _SearchUserScreenState extends State<SearchUserScreen> {
-  static const Duration _debounceDelay = Duration(milliseconds: 350);
   static const int _maxQueryLength = 50;
 
   final ApiGateway _gateway = ApiGateway.instance;
@@ -26,13 +23,23 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
   List<Map<String, dynamic>> _history = [];
   bool _isSearching = false;
   bool _hasError = false;
-  Timer? _debounce;
+  bool _rateLimited = false;
+  String _submitted = '';
 
   String get _owner => _gateway.currentUser?.id ?? 'guest';
 
   String get _query {
     final text = _controller.text.trim().replaceAll(RegExp(r'\s+'), ' ');
     return String.fromCharCodes(text.runes.take(_maxQueryLength)).trim();
+  }
+
+  bool get _isServerView => _query.isNotEmpty && _query == _submitted;
+
+  List<Map<String, dynamic>> get _localMatches {
+    final needle = _query.toLowerCase();
+    return _history
+        .where((user) => _nameOf(user).toLowerCase().contains(needle))
+        .toList();
   }
 
   @override
@@ -44,42 +51,43 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
     _controller.removeListener(_onQueryChanged);
     _controller.dispose();
     super.dispose();
   }
 
-  void _onQueryChanged() {
-    _debounce?.cancel();
+  void _onQueryChanged() => setState(() {});
+
+  Future<void> _submit() async {
     final query = _query;
-    if (query.isEmpty) {
-      setState(() {
-        _results = [];
-        _isSearching = false;
-        _hasError = false;
-      });
-      return;
-    }
+    if (query.isEmpty) return;
+    FocusScope.of(context).unfocus();
+    if (query == _submitted && (_isSearching || !_hasError)) return;
+
     setState(() {
+      _submitted = query;
+      _results = [];
       _isSearching = true;
       _hasError = false;
+      _rateLimited = false;
     });
-    _debounce = Timer(_debounceDelay, () => _search(query));
-  }
 
-  Future<void> _search(String query) async {
     var rows = <Map<String, dynamic>>[];
     var failed = false;
+    var limited = false;
     try {
       rows = await _gateway.searchProfiles(query);
+    } on GatewayException catch (e) {
+      failed = true;
+      limited = e.code == 'rate_limited';
     } catch (_) {
       failed = true;
     }
-    if (!mounted || query != _query) return;
+    if (!mounted || query != _submitted) return;
     setState(() {
       _results = rows;
       _hasError = failed;
+      _rateLimited = limited;
       _isSearching = false;
     });
   }
@@ -118,7 +126,10 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
     final confirmed = await showCupertinoDialog<bool>(
       context: context,
       builder: (context) => CupertinoAlertDialog(
-        title: const Text('Are you sure to apply this action?'),
+        title: const Text(
+          'Are you sure to apply this action?',
+          style: TextStyle(fontWeight: FontWeight.normal, fontSize: 14.0),
+        ),
         actions: [
           CupertinoDialogAction(
             onPressed: () => Navigator.pop(context, false),
@@ -160,8 +171,10 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
   }
 
   String get _emptyMessage {
-    if (_hasError) return 'Could not search right now';
-    return _query.isEmpty ? 'No recent searches' : 'No users found';
+    if (_query.isEmpty) return 'No recent searches';
+    if (!_isServerView) return 'Press enter to search';
+    if (_rateLimited) return 'Too many searches. Try again in a minute';
+    return _hasError ? 'Could not search right now' : 'No users found';
   }
 
   @override
@@ -170,7 +183,11 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
       Theme.of(context).brightness == Brightness.dark,
     );
     final showingHistory = _query.isEmpty;
-    final items = showingHistory ? _history : _results;
+    final items = showingHistory
+        ? _history
+        : _isServerView
+        ? _results
+        : _localMatches;
 
     return Scaffold(
       backgroundColor: palette.background,
@@ -230,6 +247,7 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
         controller: _controller,
         placeholder: 'Search by name...',
         autocorrect: false,
+        onSubmitted: (_) => _submit(),
         backgroundColor: palette.field,
         prefixIcon: Icon(Icons.search, color: palette.subtitle, size: 20),
         suffixIcon: Icon(Icons.clear, color: palette.subtitle, size: 20),
@@ -276,7 +294,7 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
     List<Map<String, dynamic>> items,
     bool showingHistory,
   ) {
-    if (_isSearching) {
+    if (_isSearching && _isServerView) {
       return const Center(child: CupertinoActivityIndicator());
     }
     if (items.isEmpty) return _buildEmpty(palette);

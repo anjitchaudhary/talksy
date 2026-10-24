@@ -271,7 +271,10 @@ class ApiGateway {
   Future<List<Map<String, dynamic>>> fetchChatPreviews({
     bool archived = false,
   }) async {
-    final res = await rpc('get_chat_previews', params: {'p_archived': archived});
+    final res = await rpc(
+      'get_chat_previews',
+      params: {'p_archived': archived},
+    );
     return List<Map<String, dynamic>>.from(res as List);
   }
 
@@ -307,11 +310,18 @@ class ApiGateway {
     final term = query.trim();
     if (currentUser == null || term.isEmpty) return [];
 
-    final rows = await rpc(
-      'search_profiles',
-      params: {'p_query': term, 'p_limit': _searchLimit},
-    );
-    return List<Map<String, dynamic>>.from(rows as List);
+    try {
+      final rows = await rpc(
+        'search_profiles',
+        params: {'p_query': term, 'p_limit': _searchLimit},
+      );
+      return List<Map<String, dynamic>>.from(rows as List);
+    } on PostgrestException catch (e) {
+      if (e.code == 'PT429') {
+        throw const GatewayException('rate_limited', status: 429);
+      }
+      rethrow;
+    }
   }
 
   Future<Map<String, dynamic>?> fetchProfile(String userId) async {
