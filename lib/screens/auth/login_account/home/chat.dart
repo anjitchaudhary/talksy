@@ -188,11 +188,15 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadLocal() async {
     try {
       final rows = await _db.messages(_me, _other);
-      if (!mounted || rows.isEmpty) return;
-      setState(() {
-        _msgs = rows;
-        _loading = false;
-      });
+      if (!mounted) return;
+      if (rows.isNotEmpty) {
+        setState(() {
+          _msgs = rows;
+          _loading = false;
+        });
+      } else if (await _db.hasChat(_me, _other) == false && mounted) {
+        setState(() => _loading = false);
+      }
     } catch (_) {}
   }
 

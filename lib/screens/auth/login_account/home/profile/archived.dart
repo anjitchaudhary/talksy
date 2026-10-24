@@ -99,11 +99,15 @@ class _ArchivedScreenState extends State<ArchivedScreen> {
     if (_me.isEmpty) return;
     try {
       final rows = await _db.chatPreviews(_me, archived: true);
-      if (!mounted || rows.isEmpty) return;
-      setState(() {
-        _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
-        _loading = false;
-      });
+      if (!mounted) return;
+      if (rows.isNotEmpty) {
+        setState(() {
+          _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
+          _loading = false;
+        });
+      } else if (await _db.previewsSynced(_me, archived: true) && mounted) {
+        setState(() => _loading = false);
+      }
     } catch (_) {}
   }
 
@@ -188,17 +192,29 @@ class _ArchivedScreenState extends State<ArchivedScreen> {
     );
   }
 
+  void _notify(String text) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
   Future<void> _unarchive(ChatPreview chat) async {
     setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
     try {
       await _gateway.unarchiveChat(chat.id);
+      await _cacheActive(chat);
+      if (mounted) _notify('User unarchived');
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not unarchive chat. Try again.')),
-      );
+      _notify('Could not unarchive chat. Try again.');
       _fetch();
     }
+  }
+
+  Future<void> _cacheActive(ChatPreview chat) async {
+    try {
+      await _db.cachePreview(_me, chat.raw, archived: false);
+    } catch (_) {}
   }
 
   @override

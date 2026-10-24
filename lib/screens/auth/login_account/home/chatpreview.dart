@@ -220,11 +220,15 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (_me.isEmpty) return;
     try {
       final rows = await _db.chatPreviews(_me);
-      if (!mounted || rows.isEmpty) return;
-      setState(() {
-        _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
-        _loading = false;
-      });
+      if (!mounted) return;
+      if (rows.isNotEmpty) {
+        setState(() {
+          _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
+          _loading = false;
+        });
+      } else if (await _db.previewsSynced(_me) && mounted) {
+        setState(() => _loading = false);
+      }
     } catch (_) {}
   }
 
@@ -325,17 +329,20 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (yes == true && mounted) await _delete(chat);
   }
 
+  void _notify(String text) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
   Future<void> _delete(ChatPreview chat) async {
     setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
     try {
       await _gateway.deleteChat(chat.id);
       await _wipeLocal(chat.id);
+      if (mounted) _notify('User deleted');
     } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not delete chat. Try again.')),
-        );
-      }
+      if (mounted) _notify('Could not delete chat. Try again.');
     }
     if (mounted) _fetch();
   }
@@ -344,13 +351,19 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
     try {
       await _gateway.archiveChat(chat.id);
+      await _cacheArchived(chat);
+      if (mounted) _notify('User archived');
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not archive chat. Try again.')),
-      );
+      _notify('Could not archive chat. Try again.');
       _fetch();
     }
+  }
+
+  Future<void> _cacheArchived(ChatPreview chat) async {
+    try {
+      await _db.cachePreview(_me, chat.raw, archived: true);
+    } catch (_) {}
   }
 
   Future<void> _wipeLocal(String peer) async {
