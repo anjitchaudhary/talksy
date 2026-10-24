@@ -1568,6 +1568,24 @@ class PreviewSlider extends StatelessWidget {
   }
 }
 
+class ArchivedSlider extends StatelessWidget {
+  final VoidCallback onUnarchive;
+
+  const ArchivedSlider({super.key, required this.onUnarchive});
+
+  @override
+  Widget build(BuildContext context) {
+    return _SliderBox(
+      width: 210,
+      child: _SliderRow(
+        icon: Icons.unarchive_outlined,
+        label: 'Unarchive',
+        onTap: onUnarchive,
+      ),
+    );
+  }
+}
+
 class _EmojiButton extends StatelessWidget {
   final String emoji;
   final bool selected;

@@ -1,4 +1,5 @@
 import '../../login.dart';
+import 'archived.dart';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -190,7 +191,12 @@ class SettingScreen extends StatelessWidget {
                       title: 'Archived',
                       textColor: textColor,
                       iconColor: iconColor,
-                      onTap: () {},
+                      onTap: () => Navigator.push(
+                        context,
+                        CupertinoPageRoute(
+                          builder: (_) => const ArchivedScreen(),
+                        ),
+                      ),
                     ),
                     Divider(
                       height: 0.5,

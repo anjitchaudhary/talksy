@@ -6,8 +6,16 @@ class LocalDb {
 
   static final LocalDb instance = LocalDb._();
 
-  static const int _version = 1;
+  static const int _version = 3;
   static const int _historyLimit = 30;
+
+  static const String _syncMarksTable = '''
+    CREATE TABLE IF NOT EXISTS sync_marks (
+      owner TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      PRIMARY KEY (owner, scope)
+    )
+  ''';
 
   static const List<String> _userColumns = [
     'first_name',
@@ -42,10 +50,22 @@ class LocalDb {
         p.join(dir, 'talksy.db'),
         version: _version,
         onCreate: _create,
+        onUpgrade: _upgrade,
       );
     } catch (_) {
       _opening = null;
       rethrow;
+    }
+  }
+
+  Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute(
+        'ALTER TABLE chat_previews ADD COLUMN archived INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (oldVersion < 3) {
+      await db.execute(_syncMarksTable);
     }
   }
 
@@ -94,6 +114,7 @@ class LocalDb {
         last_reaction_sender_id TEXT,
         last_reaction_message TEXT,
         unread_count INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (owner, id)
       )
     ''');
@@ -135,6 +156,8 @@ class LocalDb {
         PRIMARY KEY (owner, id)
       )
     ''');
+
+    await db.execute(_syncMarksTable);
   }
 
   Future<List<Map<String, dynamic>>> messages(String owner, String peer) async {
@@ -244,12 +267,15 @@ class LocalDb {
     };
   }
 
-  Future<List<Map<String, dynamic>>> chatPreviews(String owner) async {
+  Future<List<Map<String, dynamic>>> chatPreviews(
+    String owner, {
+    bool archived = false,
+  }) async {
     final db = await _database;
     final rows = await db.query(
       'chat_previews',
-      where: 'owner = ?',
-      whereArgs: [owner],
+      where: 'owner = ? AND archived = ?',
+      whereArgs: [owner, archived ? 1 : 0],
       orderBy: 'position ASC',
     );
     return rows.map<Map<String, dynamic>>((r) {
@@ -263,22 +289,84 @@ class LocalDb {
 
   Future<void> saveChatPreviews(
     String owner,
-    List<Map<String, dynamic>> rows,
-  ) async {
+    List<Map<String, dynamic>> rows, {
+    bool archived = false,
+  }) async {
     final db = await _database;
+    final flag = archived ? 1 : 0;
     final batch = db.batch();
-    batch.delete('chat_previews', where: 'owner = ?', whereArgs: [owner]);
+    batch.delete(
+      'chat_previews',
+      where: 'owner = ? AND archived = ?',
+      whereArgs: [owner, flag],
+    );
     for (var i = 0; i < rows.length; i++) {
-      final r = rows[i];
-      batch.insert('chat_previews', <String, Object?>{
-        'owner': owner,
-        'position': i,
-        for (final c in _previewColumns) c: r[c]?.toString(),
-        'last_unsent': r['last_unsent'] == true ? 1 : 0,
-        'unread_count': (r['unread_count'] as num?)?.toInt() ?? 0,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      batch.insert(
+        'chat_previews',
+        _previewRow(owner, i, rows[i], flag),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     }
+    batch.insert('sync_marks', <String, Object?>{
+      'owner': owner,
+      'scope': _previewScope(archived),
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
     await batch.commit(noResult: true);
+  }
+
+  Future<void> cachePreview(
+    String owner,
+    Map<String, dynamic> row, {
+    required bool archived,
+  }) async {
+    final db = await _database;
+    await db.insert(
+      'chat_previews',
+      _previewRow(owner, 0, row, archived ? 1 : 0),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<bool> previewsSynced(String owner, {bool archived = false}) async {
+    final db = await _database;
+    final rows = await db.query(
+      'sync_marks',
+      where: 'owner = ? AND scope = ?',
+      whereArgs: [owner, _previewScope(archived)],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  Future<bool?> hasChat(String owner, String peer) async {
+    final db = await _database;
+    final rows = await db.query(
+      'chat_previews',
+      columns: ['id'],
+      where: 'owner = ? AND id = ?',
+      whereArgs: [owner, peer],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) return true;
+    return await previewsSynced(owner) ? false : null;
+  }
+
+  String _previewScope(bool archived) => archived ? 'archived' : 'previews';
+
+  Map<String, Object?> _previewRow(
+    String owner,
+    int position,
+    Map<String, dynamic> r,
+    int archived,
+  ) {
+    return <String, Object?>{
+      'owner': owner,
+      'position': position,
+      for (final c in _previewColumns) c: r[c]?.toString(),
+      'last_unsent': r['last_unsent'] == true ? 1 : 0,
+      'unread_count': (r['unread_count'] as num?)?.toInt() ?? 0,
+      'archived': archived,
+    };
   }
 
   Future<Map<String, dynamic>?> profile(String id) async {
@@ -376,7 +464,12 @@ class LocalDb {
   Future<void> wipe(String owner) async {
     final db = await _database;
     final batch = db.batch();
-    for (final table in ['messages', 'chat_previews', 'search_history']) {
+    for (final table in [
+      'messages',
+      'chat_previews',
+      'search_history',
+      'sync_marks',
+    ]) {
       batch.delete(table, where: 'owner = ?', whereArgs: [owner]);
     }
     batch.delete('profiles', where: 'id = ?', whereArgs: [owner]);

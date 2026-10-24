@@ -59,7 +59,7 @@ Rect _rectOf(BuildContext context) {
   return box.localToGlobal(Offset.zero) & box.size;
 }
 
-class _Preview {
+class ChatPreview {
   final Map<String, dynamic> raw;
   final String id;
   final String name;
@@ -95,7 +95,7 @@ class _Preview {
     return mine ? 'You: $text' : text;
   }
 
-  const _Preview({
+  const ChatPreview({
     required this.raw,
     required this.id,
     required this.name,
@@ -112,11 +112,11 @@ class _Preview {
     required this.reactedAt,
   });
 
-  factory _Preview.from(Map<String, dynamic> r, String me) {
+  factory ChatPreview.from(Map<String, dynamic> r, String me) {
     final time = r['last_at'];
     final reactTime = r['last_reaction_at'];
     final reactedSender = r['last_reaction_sender_id'];
-    return _Preview(
+    return ChatPreview(
       raw: r,
       id: (r['id'] ?? '').toString(),
       name: _nameOf(r),
@@ -151,7 +151,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   final _search = TextEditingController();
   final _focus = FocusNode();
 
-  List<_Preview> _chats = [];
+  List<ChatPreview> _chats = [];
   bool _loading = true;
   bool _busy = false;
   bool _queued = false;
@@ -166,6 +166,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   void initState() {
     super.initState();
     _presence.connected.addListener(_onNetChange);
+    _gateway.archiveRevision.addListener(_onArchiveChange);
     _init();
   }
 
@@ -191,6 +192,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   @override
   void dispose() {
     _presence.connected.removeListener(_onNetChange);
+    _gateway.archiveRevision.removeListener(_onArchiveChange);
     _debounce?.cancel();
     _unlock?.cancel();
     final ch = _channel;
@@ -210,13 +212,17 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (_presence.connected.value) _fetch();
   }
 
+  void _onArchiveChange() {
+    _fetch();
+  }
+
   Future<void> _loadLocal() async {
     if (_me.isEmpty) return;
     try {
       final rows = await _db.chatPreviews(_me);
       if (!mounted || rows.isEmpty) return;
       setState(() {
-        _chats = rows.map((r) => _Preview.from(r, _me)).toList();
+        _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
         _loading = false;
       });
     } catch (_) {}
@@ -261,7 +267,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
       final rows = await _gateway.fetchChatPreviews();
       if (!mounted) return;
       setState(() {
-        _chats = rows.map((r) => _Preview.from(r, _me)).toList();
+        _chats = rows.map((r) => ChatPreview.from(r, _me)).toList();
         _loading = false;
       });
       _saveLocal(rows);
@@ -276,7 +282,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     }
   }
 
-  Future<void> _open(_Preview chat) async {
+  Future<void> _open(ChatPreview chat) async {
     await Navigator.push(
       context,
       CupertinoPageRoute(builder: (context) => ChatScreen(user: chat.raw)),
@@ -284,20 +290,20 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     _fetch();
   }
 
-  void _onHold(_Preview chat, Rect anchor) {
+  void _onHold(ChatPreview chat, Rect anchor) {
     HapticFeedback.mediumImpact();
     showSlider(
       context: context,
       anchor: anchor,
       alignRight: false,
       child: PreviewSlider(
-        onArchive: () {},
+        onArchive: () => _archive(chat),
         onDelete: () => _confirmDelete(chat),
       ),
     );
   }
 
-  Future<void> _confirmDelete(_Preview chat) async {
+  Future<void> _confirmDelete(ChatPreview chat) async {
     final yes = await showCupertinoDialog<bool>(
       context: context,
       builder: (context) => CupertinoAlertDialog(
@@ -319,7 +325,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (yes == true && mounted) await _delete(chat);
   }
 
-  Future<void> _delete(_Preview chat) async {
+  Future<void> _delete(ChatPreview chat) async {
     setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
     try {
       await _gateway.deleteChat(chat.id);
@@ -334,13 +340,26 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
     if (mounted) _fetch();
   }
 
+  Future<void> _archive(ChatPreview chat) async {
+    setState(() => _chats = _chats.where((c) => c.id != chat.id).toList());
+    try {
+      await _gateway.archiveChat(chat.id);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not archive chat. Try again.')),
+      );
+      _fetch();
+    }
+  }
+
   Future<void> _wipeLocal(String peer) async {
     try {
       await _db.deleteChat(_me, peer);
     } catch (_) {}
   }
 
-  Future<void> _openProfile(_Preview chat) async {
+  Future<void> _openProfile(ChatPreview chat) async {
     await Navigator.push(
       context,
       CupertinoPageRoute(
@@ -435,7 +454,7 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
       },
       itemBuilder: (context, i) {
         final chat = list[i];
-        return _PreviewTile(
+        return PreviewTile(
           key: ValueKey(chat.id),
           chat: chat,
           isDark: dark,
@@ -487,14 +506,14 @@ class _ChatPreviewScreenState extends State<ChatPreviewScreen> {
   }
 }
 
-class _PreviewTile extends StatelessWidget {
-  final _Preview chat;
+class PreviewTile extends StatelessWidget {
+  final ChatPreview chat;
   final bool isDark;
   final VoidCallback onTap;
   final ValueChanged<Rect> onHold;
   final VoidCallback onAvatarTap;
 
-  const _PreviewTile({
+  const PreviewTile({
     super.key,
     required this.chat,
     required this.isDark,

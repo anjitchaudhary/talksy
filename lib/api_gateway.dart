@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -27,6 +28,8 @@ class ApiGateway {
 
   static const Duration _timeout = Duration(seconds: 20);
   static const int _searchLimit = 20;
+
+  final ValueNotifier<int> archiveRevision = ValueNotifier<int>(0);
 
   SupabaseClient get _db => Supabase.instance.client;
 
@@ -265,13 +268,25 @@ class ApiGateway {
     return res == true;
   }
 
-  Future<List<Map<String, dynamic>>> fetchChatPreviews() async {
-    final res = await rpc('get_chat_previews');
+  Future<List<Map<String, dynamic>>> fetchChatPreviews({
+    bool archived = false,
+  }) async {
+    final res = await rpc('get_chat_previews', params: {'p_archived': archived});
     return List<Map<String, dynamic>>.from(res as List);
   }
 
   Future<void> deleteChat(String partnerId) async {
     await rpc('delete_chat', params: {'p_partner': partnerId});
+  }
+
+  Future<void> archiveChat(String partnerId) async {
+    await rpc('archive_chat', params: {'p_partner': partnerId});
+    archiveRevision.value++;
+  }
+
+  Future<void> unarchiveChat(String partnerId) async {
+    await rpc('unarchive_chat', params: {'p_partner': partnerId});
+    archiveRevision.value++;
   }
 
   String avatarUrl(Object? raw) {
