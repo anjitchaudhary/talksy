@@ -138,19 +138,6 @@ class SettingScreen extends StatelessWidget {
                       indent: 52,
                     ),
                     _buildSettingItem(
-                      icon: Icons.email_outlined,
-                      title: 'Change email',
-                      textColor: textColor,
-                      iconColor: iconColor,
-                      onTap: () {},
-                    ),
-                    Divider(
-                      height: 0.5,
-                      thickness: 0.5,
-                      color: dividerColor,
-                      indent: 52,
-                    ),
-                    _buildSettingItem(
                       icon: Icons.verified_outlined,
                       title: 'Blue tick badge',
                       textColor: textColor,
