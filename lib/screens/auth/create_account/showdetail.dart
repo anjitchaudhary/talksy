@@ -116,10 +116,6 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
 
       final user = await _api.signIn(_email, widget.password);
 
-      try {
-        await _api.linkGoogle(google.idToken);
-      } catch (_) {}
-
       final imageUrl = await _uploadProfileImage();
       if (imageUrl != null) {
         try {
@@ -172,6 +168,12 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
         return 'This email is already registered. Please log in.';
       case 'invalid_details':
         return 'Some of your details are invalid. Please go back and check.';
+      case 'weak_password':
+        return 'Your password is too weak. Please go back and choose a stronger one.';
+      case 'rate_limited':
+        return 'Too many attempts. Please wait a few minutes and try again.';
+      case 'google_unreachable':
+        return 'Could not reach Google. Please try again.';
       default:
         return 'Could not create your account. Please try again.';
     }

@@ -1,12 +1,15 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:talksy/api_gateway.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 
 import 'createpassword.dart';
+
+final RegExp _emailPattern = RegExp(
+  r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$",
+);
 
 class EmailScreen extends StatefulWidget {
   final String firstName;
@@ -48,128 +51,59 @@ class EmailScreen extends StatefulWidget {
 
 class _EmailScreenState extends State<EmailScreen> {
   final TextEditingController _emailController = TextEditingController();
-  final SupabaseClient _supabase = Supabase.instance.client;
 
-  Timer? _debounce;
+  int _requestId = 0;
   bool _isChecking = false;
   bool _isEmailAvailable = false;
   String? _errorMessage;
 
-  @override
-  void initState() {
-    super.initState();
-    _emailController.addListener(_onEmailChanged);
+  void _onEmailChanged(String _) {
+    _requestId++;
+    setState(() {
+      _isChecking = false;
+      _isEmailAvailable = false;
+      _errorMessage = null;
+    });
   }
 
-  void _onEmailChanged() {
+  Future<void> _checkEmail() async {
     final email = _emailController.text.trim();
+    if (_isChecking || email.isEmpty) return;
 
-    // Reset debounce timer on every keystroke to prevent spamming Supabase requests
-    if (_debounce?.isActive ?? false) _debounce!.cancel();
-
-    // Check email regex format strictly ending with .com
-    final isValidFormat = RegExp(
-      r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+\.com$",
-      caseSensitive: false,
-    ).hasMatch(email);
-
-    if (email.isEmpty) {
-      setState(() {
-        _isChecking = false;
-        _isEmailAvailable = false;
-        _errorMessage = null;
-      });
+    if (email.length > 254 || !_emailPattern.hasMatch(email)) {
+      setState(() => _errorMessage = 'Please enter a valid email address');
       return;
     }
 
-    if (!isValidFormat) {
-      setState(() {
-        _isChecking = false;
-        _isEmailAvailable = false;
-        _errorMessage = 'Please enter a valid email ending with .com';
-      });
-      return;
-    }
-
-    // Set checking state to true while debouncing
+    final requestId = ++_requestId;
     setState(() {
       _isChecking = true;
-      _errorMessage = null;
       _isEmailAvailable = false;
+      _errorMessage = null;
     });
 
-    // Wait 500ms after typing stops before querying Supabase
-    _debounce = Timer(const Duration(milliseconds: 500), () {
-      _checkEmailExistenceInSupabase(email);
-    });
-  }
-
-  Future<void> _checkEmailExistenceInSupabase(String email) async {
     try {
-      bool emailExists = false;
-      bool checkSuccessful = false;
+      final exists = await ApiGateway.instance.emailExists(email);
+      if (!mounted || requestId != _requestId) return;
 
-      // 1. Try calling the Supabase RPC function first (Best way)
-      try {
-        final rpcRes = await _supabase.rpc(
-          'check_email_exists',
-          params: {'email_input': email},
-        );
-        if (rpcRes is bool) {
-          emailExists = rpcRes;
-          checkSuccessful = true;
-        }
-      } catch (rpcError) {
-        debugPrint('RPC Error (Did you create the SQL function?): $rpcError');
-
-        // 2. Fallback to 'profiles' table if RPC fails
-        try {
-          final profileRes = await _supabase
-              .from('profiles')
-              .select('id')
-              .eq('email', email)
-              .maybeSingle();
-
-          emailExists = profileRes != null;
-          checkSuccessful = true;
-        } catch (tableError) {
-          debugPrint(
-            'Table Error (RLS blocking or table missing): $tableError',
-          );
-        }
-      }
-
-      if (!mounted) return;
-
-      if (!checkSuccessful) {
-        setState(() {
-          _isChecking = false;
-          _isEmailAvailable = false;
-          _errorMessage = 'Database setup incomplete. Check console logs.';
-        });
-        return;
-      }
-
-      if (emailExists) {
-        setState(() {
-          _isChecking = false;
-          _isEmailAvailable = false;
-          _errorMessage = 'This email is already taken, try another';
-        });
-      } else {
-        setState(() {
-          _isChecking = false;
-          _isEmailAvailable = true;
-          _errorMessage = null;
-        });
-      }
+      setState(() {
+        _isChecking = false;
+        _isEmailAvailable = !exists;
+        _errorMessage = exists
+            ? 'This email is already taken, try another'
+            : null;
+      });
     } catch (e) {
-      debugPrint('Unexpected connection error: $e');
-      if (!mounted) return;
+      debugPrint('Email check failed: $e');
+      if (!mounted || requestId != _requestId) return;
+
+      final rateLimited = e is GatewayException && e.code == 'rate_limited';
       setState(() {
         _isChecking = false;
         _isEmailAvailable = false;
-        _errorMessage = 'Could not verify email. Check your connection.';
+        _errorMessage = rateLimited
+            ? 'Too many attempts. Please wait a minute and try again.'
+            : 'Could not verify email. Check your connection.';
       });
     }
   }
@@ -204,8 +138,6 @@ class _EmailScreenState extends State<EmailScreen> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
-    _emailController.removeListener(_onEmailChanged);
     _emailController.dispose();
     super.dispose();
   }
@@ -280,6 +212,9 @@ class _EmailScreenState extends State<EmailScreen> {
                         child: TextField(
                           controller: _emailController,
                           keyboardType: TextInputType.emailAddress,
+                          textInputAction: TextInputAction.search,
+                          onChanged: _onEmailChanged,
+                          onSubmitted: (_) => _checkEmail(),
                           style: TextStyle(color: textColor),
                           decoration: const InputDecoration(
                             hintText: 'example@gmail.com',
@@ -289,15 +224,41 @@ class _EmailScreenState extends State<EmailScreen> {
                       ),
                       if (_isChecking)
                         const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppTheme.primary,
+                          ),
                         )
                       else if (_isEmailAvailable)
-                        const Icon(
-                          Icons.check_circle,
-                          color: Colors.green,
-                          size: 20,
+                        const Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Icon(
+                            Icons.check_circle_rounded,
+                            color: Colors.green,
+                            size: 20,
+                          ),
+                        )
+                      else
+                        Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: _checkEmail,
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primary.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Icon(
+                                Icons.search_rounded,
+                                color: AppTheme.primary,
+                                size: 20,
+                              ),
+                            ),
+                          ),
                         ),
                     ],
                   ),

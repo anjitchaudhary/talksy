@@ -58,6 +58,9 @@ class _GoogleAuth {
   }
 
   static String messageFor(Object error, {required String fallback}) {
+    if (error is GatewayException && error.code == 'rate_limited') {
+      return 'Too many attempts. Please wait a minute and try again.';
+    }
     if (error is GatewayException && error.code.startsWith('google')) {
       return 'Google sign in failed. Please try again.';
     }
@@ -1037,11 +1040,14 @@ class _OtpBottomSheetWidgetState extends State<_OtpBottomSheetWidget> {
         _isVerifying = false;
         _errorMessage = 'Incorrect or expired code.';
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
+      final rateLimited = e is GatewayException && e.code == 'rate_limited';
       setState(() {
         _isVerifying = false;
-        _errorMessage = 'Verification failed. Please try again.';
+        _errorMessage = rateLimited
+            ? 'Too many attempts. Please wait a minute and try again.'
+            : 'Verification failed. Please try again.';
       });
     }
   }

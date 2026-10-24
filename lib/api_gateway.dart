@@ -49,28 +49,46 @@ class ApiGateway {
     await _db.removeChannel(channel);
   }
 
-  Future<bool> isEmailRegistered(String email) async {
-    final res = await rpc(
-      'is_email_registered',
-      params: {'p_email': email.trim().toLowerCase()},
-    );
-    return res == true;
+  Future<bool> _guardedCheck(
+    String function,
+    Map<String, dynamic> body,
+    String resultKey,
+  ) async {
+    try {
+      final res = await _db.functions
+          .invoke(function, body: body)
+          .timeout(_timeout);
+      final data = res.data;
+      if (data is Map && data[resultKey] is bool) {
+        return data[resultKey] as bool;
+      }
+      throw const GatewayException('request_failed');
+    } on FunctionException catch (e) {
+      final details = e.details;
+      final code = details is Map ? details['error'] as String? : null;
+      throw GatewayException(code ?? 'request_failed', status: e.status);
+    }
   }
 
-  Future<bool> emailExists(String email) async {
-    final res = await rpc(
-      'check_email_exists',
-      params: {'email_input': email.trim().toLowerCase()},
-    );
-    return res == true;
+  Future<bool> isEmailRegistered(String email) {
+    return _guardedCheck('check-email', {
+      'email': email.trim().toLowerCase(),
+      'mode': 'registered',
+    }, 'exists');
   }
 
-  Future<bool> verifyCode(String email, String code) async {
-    final res = await rpc(
-      'verify_code_for_email',
-      params: {'p_email': email.trim().toLowerCase(), 'p_code': code},
-    );
-    return res == true;
+  Future<bool> emailExists(String email) {
+    return _guardedCheck('check-email', {
+      'email': email.trim().toLowerCase(),
+      'mode': 'exists',
+    }, 'exists');
+  }
+
+  Future<bool> verifyCode(String email, String code) {
+    return _guardedCheck('verify-code', {
+      'email': email.trim().toLowerCase(),
+      'code': code,
+    }, 'valid');
   }
 
   Future<GoogleIdentity?> pickGoogleAccount() async {
@@ -295,7 +313,10 @@ class ApiGateway {
   String avatarUrl(Object? raw) {
     if (raw is! String) return '';
     final url = raw.trim();
-    if (url.isEmpty || url.startsWith('/') || url.contains('data/user')) {
+    if (url.isEmpty ||
+        url.startsWith('/') ||
+        url.contains('data/user') ||
+        url.contains('googleusercontent.com')) {
       return '';
     }
     if (url.startsWith('http://') || url.startsWith('https://')) return url;
