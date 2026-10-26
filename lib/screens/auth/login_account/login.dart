@@ -734,7 +734,10 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     showCupertinoDialog(
       context: context,
       builder: (dialogContext) => CupertinoAlertDialog(
-        title: const Text('Are you sure to remove this saved account?'),
+        title: const Text(
+          'Are you sure to remove this saved account?',
+          style: TextStyle(fontWeight: FontWeight.normal, fontSize: 16),
+        ),
         actions: [
           CupertinoDialogAction(
             onPressed: () => Navigator.pop(dialogContext),
