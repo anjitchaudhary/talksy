@@ -91,6 +91,14 @@ class ApiGateway {
     }, 'valid');
   }
 
+  Future<void> verifyCaptcha(String token, {String email = ''}) async {
+    final valid = await _guardedCheck('verify-captcha', {
+      'captcha_token': token,
+      'email': email.trim().toLowerCase(),
+    }, 'valid');
+    if (!valid) throw const GatewayException('captcha_failed');
+  }
+
   Future<GoogleIdentity?> pickGoogleAccount() async {
     try {
       await GoogleSignIn.instance.signOut();
@@ -123,6 +131,7 @@ class ApiGateway {
     required String lastName,
     required DateTime dob,
     required String gender,
+    required String captchaToken,
   }) async {
     try {
       await _db.functions
@@ -136,6 +145,7 @@ class ApiGateway {
               'last_name': lastName.trim(),
               'dob': dob.toIso8601String().substring(0, 10),
               'gender': gender,
+              'captcha_token': captchaToken,
             },
           )
           .timeout(_timeout);

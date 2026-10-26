@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -13,12 +14,15 @@ import 'package:supabase_flutter/supabase_flutter.dart'
 import 'package:talksy/api_gateway.dart';
 import 'package:talksy/local_db.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import 'home/home.dart';
 
 ApiGateway get _api => ApiGateway.instance;
 
 final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+const int _maxEmailLength = 180;
 
 Future<void> _enterHome(NavigatorState nav, String userId) async {
   final prefs = await SharedPreferences.getInstance();
@@ -63,6 +67,9 @@ class _GoogleAuth {
     }
     if (error is GatewayException && error.code.startsWith('google')) {
       return 'Google sign in failed. Please try again.';
+    }
+    if (error is GatewayException && error.code.startsWith('captcha')) {
+      return 'Captcha verification failed. Please try again.';
     }
     if (error is _GoogleLoginException) return error.message;
     return fallback;
@@ -295,7 +302,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final email = _emailCtrl.text.trim().toLowerCase();
     final password = _passCtrl.text;
 
-    if (!_emailPattern.hasMatch(email)) {
+    if (!_emailPattern.hasMatch(email) || email.length > _maxEmailLength) {
       _showSnack('Please enter a valid email address.');
       return;
     }
@@ -303,6 +310,10 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isAuthenticating = true);
 
     try {
+      final token = await _LoginCaptchaDialog.show(context, email: email);
+      if (token == null) return;
+      await _api.verifyCaptcha(token, email: email);
+
       await _api.signIn(email, password);
       await _api.signOutLocal();
       if (!mounted) return;
@@ -312,8 +323,10 @@ class _LoginScreenState extends State<LoginScreen> {
           e.code == 'invalid_credentials' ||
           e.message.contains('Invalid login');
       _showSnack(wrongLogin ? 'Invalid email or password.' : e.message);
-    } catch (_) {
-      _showSnack('Network error. Please try again.');
+    } catch (e) {
+      _showSnack(
+        _GoogleAuth.messageFor(e, fallback: 'Network error. Please try again.'),
+      );
     } finally {
       if (mounted) setState(() => _isAuthenticating = false);
     }
@@ -370,6 +383,10 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isGoogleLoading = true);
 
     try {
+      final token = await _LoginCaptchaDialog.show(context);
+      if (token == null) return;
+      await _api.verifyCaptcha(token);
+
       final user = await _GoogleAuth.signIn();
       if (user == null) return;
       await SavedAccountStore.save(user: user);
@@ -757,6 +774,10 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
 
   Future<void> _loginToAccount(Map<String, dynamic> account) async {
     final nav = Navigator.of(context);
+    final String email = account['email'];
+
+    final token = await _LoginCaptchaDialog.show(context, email: email);
+    if (token == null || !mounted) return;
 
     showCupertinoDialog(
       context: context,
@@ -770,6 +791,7 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
     );
 
     try {
+      await _api.verifyCaptcha(token, email: email);
       final user = await _authenticate(account);
       if (user == null) {
         nav.pop();
@@ -972,6 +994,191 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
                   );
                 },
               ),
+      ),
+    );
+  }
+}
+
+class _LoginCaptchaDialog extends StatefulWidget {
+  const _LoginCaptchaDialog({required this.email});
+
+  final String email;
+
+  static const String siteKey = String.fromEnvironment('TURNSTILE_SITE_KEY');
+  static const String origin = String.fromEnvironment('TURNSTILE_ORIGIN');
+
+  static Future<String?> show(BuildContext context, {String email = ''}) {
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => _LoginCaptchaDialog(email: email),
+    );
+  }
+
+  @override
+  State<_LoginCaptchaDialog> createState() => _LoginCaptchaDialogState();
+}
+
+class _LoginCaptchaDialogState extends State<_LoginCaptchaDialog> {
+  static const String action = 'login';
+
+  String get _page {
+    final siteKey = _jsLiteral(_LoginCaptchaDialog.siteKey);
+    final email = widget.email.trim().toLowerCase();
+    final cData = email.isEmpty
+        ? ''
+        : 'cData: ${_jsLiteral(base64Url.encode(utf8.encode(email)).replaceAll('=', ''))},';
+    return '''
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body { display: flex; align-items: center; }
+#box { width: 100%; }
+</style>
+<script>
+function initCaptcha() {
+  try {
+    turnstile.render('#box', {
+      sitekey: $siteKey,
+      action: '$action',
+      $cData
+      size: 'flexible',
+      theme: 'auto',
+      callback: function (token) { Captcha.postMessage('token:' + token); },
+      'error-callback': function () { Captcha.postMessage('error'); }
+    });
+  } catch (e) {
+    Captcha.postMessage('error');
+  }
+}
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=initCaptcha"
+  async defer onerror="Captcha.postMessage('error')"></script>
+</head>
+<body><div id="box"></div></body>
+</html>
+''';
+  }
+
+  static String _jsLiteral(String value) {
+    return jsonEncode(value).replaceAll('<', r'\u003c');
+  }
+
+  late final WebViewController _controller;
+  bool _loading = true;
+  bool _failed = false;
+  bool _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.transparent)
+      ..addJavaScriptChannel('Captcha', onMessageReceived: _onMessage)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (_) {
+            if (mounted) setState(() => _loading = false);
+          },
+          onWebResourceError: (error) {
+            if (error.isForMainFrame == false || !mounted) return;
+            setState(() {
+              _failed = true;
+              _loading = false;
+            });
+          },
+        ),
+      )
+      ..loadHtmlString(_page, baseUrl: _LoginCaptchaDialog.origin);
+  }
+
+  void _onMessage(JavaScriptMessage message) {
+    if (_done || !mounted) return;
+    final data = message.message;
+    if (data.startsWith('token:')) {
+      _done = true;
+      final token = data.substring(6);
+      Future.delayed(const Duration(milliseconds: 700), () {
+        if (mounted) Navigator.of(context).pop(token);
+      });
+    } else if (data == 'error') {
+      setState(() {
+        _failed = true;
+        _loading = false;
+      });
+    }
+  }
+
+  void _retry() {
+    setState(() {
+      _failed = false;
+      _loading = true;
+    });
+    _controller.loadHtmlString(_page, baseUrl: _LoginCaptchaDialog.origin);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.6);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SizedBox(
+          width: double.infinity,
+          height: _failed ? null : 65 * textScale,
+          child: _failed ? _errorCard(context) : _widget(),
+        ),
+      ),
+    );
+  }
+
+  Widget _widget() {
+    return Stack(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: WebViewWidget(controller: _controller),
+        ),
+        if (_loading)
+          const Center(
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2.5,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _errorCard(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'Could not load the verification. Check your internet and try again.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          TextButton(onPressed: _retry, child: const Text('Retry')),
+        ],
       ),
     );
   }

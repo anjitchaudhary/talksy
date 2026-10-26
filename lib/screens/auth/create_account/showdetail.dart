@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:talksy/api_gateway.dart';
+import 'package:talksy/screens/auth/create_account/captcha_dialog.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
 import 'package:talksy/screens/auth/login_account/home/home.dart';
 import 'package:talksy/screens/auth/login_account/login.dart'
@@ -92,6 +93,10 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
         return;
       }
 
+      if (!mounted) return;
+      final captchaToken = await CaptchaDialog.show(context, email: _email);
+      if (captchaToken == null) return;
+
       final google = await _api.pickGoogleAccount();
       if (google == null) return;
 
@@ -109,6 +114,7 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
           lastName: widget.lastName,
           dob: widget.dob,
           gender: widget.gender,
+          captchaToken: captchaToken,
         );
       } on GatewayException catch (e) {
         if (e.status != 409) rethrow;
@@ -174,6 +180,10 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
         return 'Too many attempts. Please wait a few minutes and try again.';
       case 'google_unreachable':
         return 'Could not reach Google. Please try again.';
+      case 'captcha_failed':
+        return 'Human verification failed. Please try again.';
+      case 'captcha_unreachable':
+        return 'Could not reach the verification service. Please try again.';
       default:
         return 'Could not create your account. Please try again.';
     }
