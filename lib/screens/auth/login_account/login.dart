@@ -61,8 +61,17 @@ class _GoogleAuth {
     return _api.signInWithGoogle(identity.idToken);
   }
 
+  static bool _isRateLimited(Object error) {
+    if (error is GatewayException) return error.code == 'rate_limited';
+    if (error is AuthApiException) {
+      return error.statusCode == '429' ||
+          error.code == 'over_request_rate_limit';
+    }
+    return false;
+  }
+
   static String messageFor(Object error, {required String fallback}) {
-    if (error is GatewayException && error.code == 'rate_limited') {
+    if (_isRateLimited(error)) {
       return 'Too many attempts. Please wait a minute and try again.';
     }
     if (error is GatewayException && error.code.startsWith('google')) {
@@ -297,6 +306,13 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  void _openTerms() {
+    Navigator.push(
+      context,
+      CupertinoPageRoute(builder: (_) => const TermsScreen()),
+    );
+  }
+
   Future<void> _onAuthenticate() async {
     FocusScope.of(context).unfocus();
     final email = _emailCtrl.text.trim().toLowerCase();
@@ -322,7 +338,11 @@ class _LoginScreenState extends State<LoginScreen> {
       final wrongLogin =
           e.code == 'invalid_credentials' ||
           e.message.contains('Invalid login');
-      _showSnack(wrongLogin ? 'Invalid email or password.' : e.message);
+      _showSnack(
+        wrongLogin
+            ? 'Invalid email or password.'
+            : _GoogleAuth.messageFor(e, fallback: e.message),
+      );
     } catch (e) {
       _showSnack(
         _GoogleAuth.messageFor(e, fallback: 'Network error. Please try again.'),
@@ -665,6 +685,35 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             Positioned(
+              left: 24,
+              right: 84,
+              bottom: 20,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _openTerms,
+                child: Text.rich(
+                  TextSpan(
+                    text: 'By signing in, you agree to the Talksy ',
+                    children: [
+                      TextSpan(
+                        text: 'Terms & Conditions',
+                        style: TextStyle(
+                          color: primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const TextSpan(text: ' and how your data is used.'),
+                    ],
+                  ),
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: mutedColor,
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
               right: 20,
               bottom: 20,
               child: SizedBox(
@@ -688,6 +737,287 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _TermsEntry {
+  const _TermsEntry(this.icon, this.title, this.text);
+
+  final IconData icon;
+  final String title;
+  final String text;
+}
+
+const String _termsUpdated = 'October 2026';
+
+const List<_TermsEntry> _collectedData = [
+  _TermsEntry(
+    Icons.alternate_email_rounded,
+    'Google account email',
+    'Used to confirm that the Google account is really yours and to link it with your Talksy login, so you can sign in with either your password or Google.',
+  ),
+  _TermsEntry(
+    Icons.password_rounded,
+    'Password',
+    'Used to protect your account. It is stored by our authentication service as a one-way hash, never in readable form. If you tick "Remember password", a copy is kept only in your phone\'s secure storage.',
+  ),
+  _TermsEntry(
+    Icons.badge_outlined,
+    'Name and gender',
+    'Your name is shown to people you chat with and helps others find you. Gender completes your profile.',
+  ),
+  _TermsEntry(
+    Icons.cake_outlined,
+    'Date of birth',
+    'Used to send you birthday notifications and to verify that you meet the minimum age requirement for Talksy.',
+  ),
+  _TermsEntry(
+    Icons.account_circle_outlined,
+    'Profile photo',
+    'Only a photo you choose yourself is used. It is shown to people you chat with and stored with our image hosting provider. We do not import your Google profile photo.',
+  ),
+  _TermsEntry(
+    Icons.chat_bubble_outline_rounded,
+    'Messages',
+    'Message text, replies, reactions, edits and delivery status (sent, delivered, seen) are stored so your chats can be delivered and restored. Messages travel over encrypted connections and are kept in encrypted storage. Only you and the person you message can open them in the app.',
+  ),
+  _TermsEntry(
+    Icons.circle_outlined,
+    'Online status and last seen',
+    'Shown to the people you chat with so they know when you are available.',
+  ),
+  _TermsEntry(
+    Icons.shield_outlined,
+    'Security signals',
+    'Cloudflare Turnstile checks that a real person is signing in. Your IP address is used only as a one-way hash to limit repeated attempts and block abuse.',
+  ),
+  _TermsEntry(
+    Icons.phone_android_rounded,
+    'Data kept on your device',
+    'Recent chats, saved accounts and search history are cached on your phone so Talksy works offline. You can remove saved accounts and searches at any time.',
+  ),
+];
+
+const List<_TermsEntry> _protectionPoints = [
+  _TermsEntry(
+    Icons.lock_outline_rounded,
+    'Protected sign-in',
+    'Password sign-in needs a 6-digit code from the Talksy Authenticator app that expires within 60 seconds. Repeated wrong codes lock the code for a few minutes.',
+  ),
+  _TermsEntry(
+    Icons.speed_rounded,
+    'Rate limiting and captcha',
+    'Sign-in, sign-up and code checks are limited per device network and verified with a captcha, which slows down guessing and automated attacks.',
+  ),
+  _TermsEntry(
+    Icons.visibility_off_outlined,
+    'Private by default',
+    'Access rules on our servers allow only the sender and the receiver to read a conversation. Your password and verification codes are never visible to other users.',
+  ),
+  _TermsEntry(
+    Icons.info_outline_rounded,
+    'No system is perfect',
+    'We apply these safeguards carefully, but no service can promise absolute security. Keep your password and codes private and log out on shared devices.',
+  ),
+];
+
+const List<_TermsEntry> _yourControls = [
+  _TermsEntry(
+    Icons.edit_outlined,
+    'Edit and unsend',
+    'You can edit a message within 30 minutes of sending it and unsend it at any time.',
+  ),
+  _TermsEntry(
+    Icons.delete_outline_rounded,
+    'Delete and archive chats',
+    'Deleting a chat clears it from your side only. Archiving hides a chat without deleting it.',
+  ),
+  _TermsEntry(
+    Icons.manage_accounts_outlined,
+    'Saved accounts',
+    'Remove any saved account from the Saved accounts screen to erase its stored password from this device.',
+  ),
+];
+
+const List<_TermsEntry> _usageRules = [
+  _TermsEntry(
+    Icons.person_outline_rounded,
+    'Eligibility and accuracy',
+    'You must meet the minimum age requirement and provide correct sign-up details, including your date of birth.',
+  ),
+  _TermsEntry(
+    Icons.gpp_maybe_outlined,
+    'Respectful use',
+    'Do not harass, threaten, spam or impersonate others, and do not share illegal or harmful content.',
+  ),
+  _TermsEntry(
+    Icons.key_outlined,
+    'Your account',
+    'You are responsible for activity on your account. Never share your password or login codes with anyone.',
+  ),
+  _TermsEntry(
+    Icons.block_rounded,
+    'Enforcement',
+    'Accounts that break these rules or abuse the service may be limited or suspended.',
+  ),
+  _TermsEntry(
+    Icons.hub_outlined,
+    'Services we rely on',
+    'Google (sign-in), Supabase (accounts and database), Cloudinary (profile photos) and Cloudflare (captcha). We do not sell your personal data.',
+  ),
+];
+
+class TermsScreen extends StatelessWidget {
+  const TermsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = Theme.of(context).scaffoldBackgroundColor;
+    final textColor = isDark ? Colors.white : Colors.black87;
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        backgroundColor: bg,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        toolbarHeight: 40,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new, size: 20, color: textColor),
+          onPressed: () => Navigator.pop(context),
+        ),
+        titleSpacing: 0,
+        title: const Text(
+          'Terms & Conditions',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          children: [
+            const Text(
+              'Your data, explained simply',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Talksy only collects what it needs to run your account and deliver your chats. Here is exactly what we take and why.',
+              style: TextStyle(fontSize: 14, height: 1.4, color: mutedColor),
+            ),
+            const _TermsSection(
+              title: 'What Talksy collects and why',
+              entries: _collectedData,
+            ),
+            const _TermsSection(
+              title: 'How your data is protected',
+              entries: _protectionPoints,
+            ),
+            const _TermsSection(title: 'Your controls', entries: _yourControls),
+            const _TermsSection(title: 'Using Talksy', entries: _usageRules),
+            const SizedBox(height: 20),
+            Center(
+              child: Text(
+                'Last updated $_termsUpdated. By signing in you accept these terms.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: mutedColor),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TermsSection extends StatelessWidget {
+  const _TermsSection({required this.title, required this.entries});
+
+  final String title;
+  final List<_TermsEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final borderColor = isDark
+        ? const Color(0xFF2C2C2E)
+        : const Color(0xFFE5E5EA);
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+    final primary = AppTheme.primary;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor, width: 0.5),
+            ),
+            child: Column(
+              children: [
+                for (var i = 0; i < entries.length; i++) ...[
+                  if (i > 0) Divider(height: 1, color: borderColor),
+                  Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: primary.withValues(alpha: 0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            entries[i].icon,
+                            size: 18,
+                            color: primary,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                entries[i].title,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                entries[i].text,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  height: 1.4,
+                                  color: mutedColor,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

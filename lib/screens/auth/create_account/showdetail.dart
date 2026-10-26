@@ -6,6 +6,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 import 'package:talksy/api_gateway.dart';
 import 'package:talksy/screens/auth/create_account/captcha_dialog.dart';
 import 'package:talksy/screens/auth/entryscreen.dart';
@@ -151,9 +152,13 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
       );
     } on GatewayException catch (e) {
       _showSnack(_messageFor(e));
+    } on AuthException catch (e) {
+      debugPrint('sign in failed: ${e.code} | ${e.statusCode} | ${e.message}');
+      _showSnack(_authMessageFor(e));
     } on TimeoutException {
       _showSnack('Connection timed out. Please check your internet.');
-    } catch (_) {
+    } catch (e) {
+      debugPrint('create account failed: $e');
       _showSnack('Something went wrong. Please try again.');
     } finally {
       if (!completed) {
@@ -186,6 +191,17 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
         return 'Could not reach the verification service. Please try again.';
       default:
         return 'Could not create your account. Please try again.';
+    }
+  }
+
+  String _authMessageFor(AuthException e) {
+    switch (e.code) {
+      case 'invalid_credentials':
+        return 'This email already has an account with a different password. Please log in instead.';
+      case 'over_request_rate_limit':
+        return 'Too many attempts. Please wait a few minutes and try again.';
+      default:
+        return 'Could not sign you in automatically. Please log in with your email and password.';
     }
   }
 
