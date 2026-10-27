@@ -18,6 +18,8 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'home/home.dart';
 
+// --- Navigation & Constants ---
+
 ApiGateway get _api => ApiGateway.instance;
 
 final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
@@ -35,6 +37,8 @@ Future<void> _enterHome(NavigatorState nav, String userId) async {
     (route) => false,
   );
 }
+
+// --- Google Authentication Handler ---
 
 class _GoogleLoginException implements Exception {
   const _GoogleLoginException(this.message);
@@ -84,6 +88,8 @@ class _GoogleAuth {
     return fallback;
   }
 }
+
+// --- Saved Account Secure Store ---
 
 class SavedAccountStore {
   static const FlutterSecureStorage _vault = FlutterSecureStorage();
@@ -153,6 +159,8 @@ class SavedAccountStore {
   }
 }
 
+// --- Custom Google Logo Painter ---
+
 class GoogleLogo extends StatelessWidget {
   const GoogleLogo({super.key, this.size = 24});
 
@@ -218,6 +226,8 @@ class _GoogleLogoPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
+
+// --- Login Screen State & UI ---
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -579,12 +589,12 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 0.5),
                       Padding(
                         padding: const EdgeInsets.only(left: 32),
                         child: Text(
-                          'When you check this option, your account will be saved on talksy and you don\'t need to enter password and verify code again to re-login.',
-                          style: TextStyle(fontSize: 11, color: mutedColor),
+                          'When you check this option, your account will be saved on device and you don\'t need to enter password and verify code again to re-login.',
+                          style: TextStyle(fontSize: 8.5, color: mutedColor),
                         ),
                       ),
                     ],
@@ -741,6 +751,8 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 }
+
+// --- Terms & Conditions Screen ---
 
 class _TermsEntry {
   const _TermsEntry(this.icon, this.title, this.text);
@@ -924,7 +936,7 @@ class TermsScreen extends StatelessWidget {
               child: Text(
                 'Last updated $_termsUpdated. By signing in you accept these terms.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12, color: mutedColor),
+                style: TextStyle(fontSize: 10, color: mutedColor),
               ),
             ),
           ],
@@ -1022,6 +1034,8 @@ class _TermsSection extends StatelessWidget {
     );
   }
 }
+
+// --- Saved Accounts Management ---
 
 class SavedAccountScreen extends StatefulWidget {
   const SavedAccountScreen({super.key});
@@ -1332,6 +1346,8 @@ class _SavedAccountScreenState extends State<SavedAccountScreen> {
   }
 }
 
+// --- Cloudflare Turnstile Captcha Dialog ---
+
 class _LoginCaptchaDialog extends StatefulWidget {
   const _LoginCaptchaDialog({required this.email});
 
@@ -1516,6 +1532,8 @@ function initCaptcha() {
     );
   }
 }
+
+// --- OTP Verification Bottom Sheet ---
 
 class _OtpBottomSheetWidget extends StatefulWidget {
   final String email;
