@@ -1,10 +1,13 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' show Icons;
 import 'package:talksy/main.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'create_account/createname.dart';
 import 'login_account/login.dart';
 
+// Defines the custom color palette for light and dark themes.
 class AppTheme {
   static const primary = CupertinoColors.activeBlue;
 
@@ -37,6 +40,7 @@ class AppTheme {
   static const subtitle = CupertinoColors.secondaryLabel;
 }
 
+// Main screen widget managing the overall dynamic gradient layout.
 class EntryScreen extends StatelessWidget {
   const EntryScreen({super.key});
 
@@ -77,6 +81,7 @@ class EntryScreen extends StatelessWidget {
   }
 }
 
+// Displays the upper branding card with app icon, welcome title, and subtitle.
 class WelcomeCardHeader extends StatelessWidget {
   const WelcomeCardHeader({super.key});
 
@@ -147,21 +152,25 @@ class WelcomeCardHeader extends StatelessWidget {
   }
 }
 
+// Groups authentication buttons and the authenticator download link vertically.
 class ActionButtonsContainer extends StatelessWidget {
   const ActionButtonsContainer({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const Column(
-      children: [
+    return Column(
+      children: const [
         PrimaryActionButton(),
         SizedBox(height: 16),
         SecondaryActionButton(),
+        SizedBox(height: 14),
+        AuthenticatorDownloadLink(),
       ],
     );
   }
 }
 
+// Renders the primary action button for user login.
 class PrimaryActionButton extends StatelessWidget {
   const PrimaryActionButton({super.key});
 
@@ -179,6 +188,7 @@ class PrimaryActionButton extends StatelessWidget {
   }
 }
 
+// Renders the secondary action button for user account creation.
 class SecondaryActionButton extends StatelessWidget {
   const SecondaryActionButton({super.key});
 
@@ -196,6 +206,76 @@ class SecondaryActionButton extends StatelessWidget {
   }
 }
 
+// Displays a very small clickable link redirecting users to the Authenticator GitHub release.
+class AuthenticatorDownloadLink extends StatefulWidget {
+  const AuthenticatorDownloadLink({super.key});
+
+  @override
+  State<AuthenticatorDownloadLink> createState() =>
+      _AuthenticatorDownloadLinkState();
+}
+
+// Manages the tap gesture state and browser launch operation for the download link.
+class _AuthenticatorDownloadLinkState extends State<AuthenticatorDownloadLink> {
+  late final TapGestureRecognizer _tapRecognizer;
+
+  @override
+  void initState() {
+    super.initState();
+    _tapRecognizer = TapGestureRecognizer()
+      ..onTap = _launchAuthenticatorRelease;
+  }
+
+  @override
+  void dispose() {
+    _tapRecognizer.dispose();
+    super.dispose();
+  }
+
+  // Launches the official release URL in an external browser app.
+  Future<void> _launchAuthenticatorRelease() async {
+    final Uri url = Uri.parse(
+      'https://github.com/anjitchaudhary/talksy_authenticator/releases/tag/v0.1.0',
+    );
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {
+      // Handles potential url launch failures gracefully.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: RichText(
+        textAlign: TextAlign.center,
+        text: TextSpan(
+          style: TextStyle(
+            fontSize: 11.0, // Made very-very small as requested
+            color: CupertinoDynamicColor.resolve(AppTheme.subtitle, context),
+          ),
+          children: [
+            TextSpan(
+              text: 'Click here',
+              style: TextStyle(
+                color: CupertinoDynamicColor.resolve(AppTheme.primary, context),
+                fontWeight: FontWeight.w600,
+              ),
+              recognizer: _tapRecognizer,
+            ),
+            const TextSpan(text: ' to download Authenticator app'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Custom reusable button widget supporting primary and outlined styles.
 class AppButton extends StatelessWidget {
   final String text;
   final IconData icon;
