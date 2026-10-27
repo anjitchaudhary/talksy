@@ -3,9 +3,9 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'api_gateway.dart';
 import 'screens/splashscreen.dart';
@@ -83,57 +83,96 @@ class PresenceService {
   Timer? _beat;
   String? _uid;
   bool _joined = false;
+  bool _isPinging = false;
+  int _sessionId = 0;
 
-  void start() {
+  Future<void> start() async {
     final user = _db.currentUser;
-    if (user == null || _uid == user.id) return;
-    if (_uid != null) unawaited(stop());
+    if (user == null) {
+      if (_uid != null) await stop();
+      return;
+    }
+
+    // Reuse existing session if this user is already connected
+    if (_uid == user.id && _beat != null) return;
+
+    final session = ++_sessionId;
+
+    // Clean up stale channels before establishing new subscriptions
+    await _cleanupChannels();
+    if (_sessionId != session) return;
 
     _uid = user.id;
-    _joinPresence();
-    _listenInbox();
-    _beat = Timer.periodic(const Duration(seconds: 20), (_) => _ping());
-    _ping();
+    _joinPresence(session);
+    _listenInbox(session);
+
+    _beat?.cancel();
+    _beat = Timer.periodic(const Duration(seconds: 20), (_) {
+      unawaited(_ping());
+    });
+
+    await _ping();
   }
 
   Future<void> stop() async {
-    if (_uid == null) return;
-
-    final channels = [_presenceCh, _inboxCh];
+    _sessionId++;
     _beat?.cancel();
     _beat = null;
-    _presenceCh = null;
-    _inboxCh = null;
-    _uid = null;
     _joined = false;
-    onlineIds.value = {};
+    _uid = null;
+    onlineIds.value = const {};
 
     try {
       await _db.rpc('touch_last_seen');
-    } catch (_) {}
+    } catch (_) {
+      // Best-effort attempt during app backgrounding or sign-out
+    }
+
+    await _cleanupChannels();
+  }
+
+  Future<void> _cleanupChannels() async {
+    final channels = [_presenceCh, _inboxCh];
+    _presenceCh = null;
+    _inboxCh = null;
 
     for (final ch in channels) {
-      if (ch != null) await _db.removeChannel(ch);
+      if (ch != null) {
+        try {
+          await _db.removeChannel(ch);
+        } catch (_) {}
+      }
     }
   }
 
-  void _joinPresence() {
+  void _joinPresence(int session) {
+    final uid = _uid;
+    if (uid == null || _sessionId != session) return;
+
     final ch = _db.channel(
       'online_users',
-      opts: RealtimeChannelConfig(key: _uid!),
+      opts: RealtimeChannelConfig(key: uid),
     );
     _presenceCh = ch;
 
-    ch.onPresenceSync((_) => _syncOnline()).subscribe((status, [error]) async {
-      if (_presenceCh != ch) return;
+    ch.onPresenceSync((_) {
+      if (_sessionId == session && _presenceCh == ch) {
+        _syncOnline();
+      }
+    }).subscribe((status, [error]) async {
+      if (_sessionId != session || _presenceCh != ch) return;
 
       if (status == RealtimeSubscribeStatus.subscribed) {
         _joined = true;
         connected.value = true;
-        await ch.track({
-          'user_id': _uid,
-          'online_at': DateTime.now().toUtc().toIso8601String(),
-        });
+        try {
+          await ch.track({
+            'user_id': uid,
+            'online_at': DateTime.now().toUtc().toIso8601String(),
+          });
+        } catch (_) {
+          // Socket write failure; recovered on subsequent ping cycle
+        }
       } else {
         _joined = false;
         connected.value = false;
@@ -155,9 +194,12 @@ class PresenceService {
     onlineIds.value = ids;
   }
 
-  void _listenInbox() {
+  void _listenInbox(int session) {
+    final uid = _uid;
+    if (uid == null || _sessionId != session) return;
+
     _inboxCh = _db
-        .channel('inbox_$_uid')
+        .channel('inbox_$uid')
         .onPostgresChanges(
           event: PostgresChangeEvent.insert,
           schema: 'public',
@@ -165,37 +207,53 @@ class PresenceService {
           filter: PostgresChangeFilter(
             type: PostgresChangeFilterType.eq,
             column: 'receiver_id',
-            value: _uid!,
+            value: uid,
           ),
-          callback: (_) => _markDelivered(),
+          callback: (_) => unawaited(_markDelivered()),
         )
         .subscribe();
   }
 
   Future<void> _markDelivered() async {
+    if (_uid == null) return;
     try {
       await _db.rpc('mark_delivered');
     } catch (_) {}
   }
 
   Future<void> _ping() async {
-    if (_uid == null) return;
+    if (_uid == null || _isPinging) return;
+    _isPinging = true;
 
     try {
       await _db.rpc('touch_last_seen');
       connected.value = true;
       await _markDelivered();
-      if (!_joined) await _rejoin();
+      if (!_joined && _uid != null) {
+        await _rejoin();
+      }
     } catch (_) {
       connected.value = false;
+    } finally {
+      _isPinging = false;
     }
   }
 
   Future<void> _rejoin() async {
+    final uid = _uid;
+    if (uid == null) return;
+
     final old = _presenceCh;
     _presenceCh = null;
-    if (old != null) await _db.removeChannel(old);
-    if (_uid != null) _joinPresence();
+    if (old != null) {
+      try {
+        await _db.removeChannel(old);
+      } catch (_) {}
+    }
+
+    if (_uid == uid) {
+      _joinPresence(_sessionId);
+    }
   }
 }
 
@@ -213,12 +271,12 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    PresenceService.instance.start();
+    unawaited(PresenceService.instance.start());
     _authSub = ApiGateway.instance.authChanges.listen((data) {
       if (data.session != null) {
-        PresenceService.instance.start();
+        unawaited(PresenceService.instance.start());
       } else {
-        PresenceService.instance.stop();
+        unawaited(PresenceService.instance.stop());
       }
     });
   }
@@ -227,6 +285,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _authSub?.cancel();
+    unawaited(PresenceService.instance.stop());
     super.dispose();
   }
 
@@ -235,10 +294,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
 
     if (state == AppLifecycleState.resumed) {
-      PresenceService.instance.start();
+      unawaited(PresenceService.instance.start());
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
-      PresenceService.instance.stop();
+      unawaited(PresenceService.instance.stop());
     }
   }
 
@@ -254,9 +313,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         return AnnotatedRegion<SystemUiOverlayStyle>(
           value: SystemUiOverlayStyle(
             statusBarColor: Colors.transparent,
-            statusBarIconBrightness: isDark
-                ? Brightness.light
-                : Brightness.dark,
+            statusBarIconBrightness:
+                isDark ? Brightness.light : Brightness.dark,
             statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
           ),
           child: DefaultTextStyle.merge(

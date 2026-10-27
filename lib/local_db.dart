@@ -1,6 +1,7 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+// Database helper singleton class for managing local SQLite storage.
 class LocalDb {
   LocalDb._();
 
@@ -9,6 +10,7 @@ class LocalDb {
   static const int _version = 3;
   static const int _historyLimit = 30;
 
+  // Schema for tracking sync status across owners and scopes.
   static const String _syncMarksTable = '''
     CREATE TABLE IF NOT EXISTS sync_marks (
       owner TEXT NOT NULL,
@@ -17,6 +19,7 @@ class LocalDb {
     )
   ''';
 
+  // Common user profile columns used in multiple database tables.
   static const List<String> _userColumns = [
     'first_name',
     'last_name',
@@ -25,6 +28,7 @@ class LocalDb {
     'avatar_url',
   ];
 
+  // Column list used when selecting chat preview records.
   static const List<String> _previewColumns = [
     'id',
     ..._userColumns,
@@ -41,8 +45,10 @@ class LocalDb {
 
   Future<Database>? _opening;
 
+  // Returns active database instance or triggers open on first access.
   Future<Database> get _database => _opening ??= _open();
 
+  // Initializes database connection with path configuration and callbacks.
   Future<Database> _open() async {
     try {
       final dir = await getDatabasesPath();
@@ -58,6 +64,7 @@ class LocalDb {
     }
   }
 
+  // Handles database schema upgrades when version number increases.
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -69,6 +76,7 @@ class LocalDb {
     }
   }
 
+  // Creates initial database tables and indexes on fresh install.
   Future<void> _create(Database db, int version) async {
     await db.execute('''
       CREATE TABLE messages (
@@ -160,6 +168,7 @@ class LocalDb {
     await db.execute(_syncMarksTable);
   }
 
+  // Retrieves messages for a specific conversation ordered by creation time.
   Future<List<Map<String, dynamic>>> messages(String owner, String peer) async {
     final db = await _database;
     final rows = await db.query(
@@ -171,6 +180,7 @@ class LocalDb {
     return rows.map(_readMessage).toList();
   }
 
+  // Inserts or updates multiple messages using a batch transaction.
   Future<void> saveMessages(
     String owner,
     String peer,
@@ -189,6 +199,7 @@ class LocalDb {
     await batch.commit(noResult: true);
   }
 
+  // Deletes existing messages for a peer and inserts fresh records.
   Future<void> replaceMessages(
     String owner,
     String peer,
@@ -211,6 +222,7 @@ class LocalDb {
     await batch.commit(noResult: true);
   }
 
+  // Clears chat messages and preview entry for a target peer.
   Future<void> deleteChat(String owner, String peer) async {
     final db = await _database;
     final batch = db.batch();
@@ -227,6 +239,7 @@ class LocalDb {
     await batch.commit(noResult: true);
   }
 
+  // Maps raw message data into table column values with safe null checks.
   Map<String, Object?> _messageRow(
     String owner,
     String peer,
@@ -236,9 +249,9 @@ class LocalDb {
     return <String, Object?>{
       'owner': owner,
       'peer': peer,
-      'id': m['id'].toString(),
-      'sender_id': m['sender_id'].toString(),
-      'receiver_id': m['receiver_id'].toString(),
+      'id': m['id']?.toString() ?? '',
+      'sender_id': m['sender_id']?.toString() ?? '',
+      'receiver_id': m['receiver_id']?.toString() ?? '',
       'message': (m['message'] ?? '').toString(),
       'status': (m['status'] ?? 'sent').toString(),
       'reply_to': m['reply_to']?.toString(),
@@ -251,6 +264,7 @@ class LocalDb {
     };
   }
 
+  // Converts database row map back into application-layer message format.
   Map<String, dynamic> _readMessage(Map<String, Object?> r) {
     return {
       'id': r['id'],
@@ -267,6 +281,7 @@ class LocalDb {
     };
   }
 
+  // Fetches list of chat previews filtered by archived state.
   Future<List<Map<String, dynamic>>> chatPreviews(
     String owner, {
     bool archived = false,
@@ -287,6 +302,7 @@ class LocalDb {
     }).toList();
   }
 
+  // Overwrites preview list and marks the scope as synced.
   Future<void> saveChatPreviews(
     String owner,
     List<Map<String, dynamic>> rows, {
@@ -314,19 +330,37 @@ class LocalDb {
     await batch.commit(noResult: true);
   }
 
+  // Inserts or replaces a single chat preview while preserving its existing sort position.
   Future<void> cachePreview(
     String owner,
     Map<String, dynamic> row, {
     required bool archived,
   }) async {
     final db = await _database;
+    final id = row['id']?.toString();
+    if (id == null) return;
+
+    final archivedFlag = archived ? 1 : 0;
+    final existing = await db.query(
+      'chat_previews',
+      columns: ['position'],
+      where: 'owner = ? AND id = ? AND archived = ?',
+      whereArgs: [owner, id, archivedFlag],
+      limit: 1,
+    );
+
+    final position = existing.isNotEmpty
+        ? (existing.first['position'] as int? ?? 0)
+        : 0;
+
     await db.insert(
       'chat_previews',
-      _previewRow(owner, 0, row, archived ? 1 : 0),
+      _previewRow(owner, position, row, archivedFlag),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
+  // Checks if initial sync mark exists for given preview scope.
   Future<bool> previewsSynced(String owner, {bool archived = false}) async {
     final db = await _database;
     final rows = await db.query(
@@ -338,21 +372,29 @@ class LocalDb {
     return rows.isNotEmpty;
   }
 
-  Future<bool?> hasChat(String owner, String peer) async {
+  // Checks if a chat preview exists locally or if sync status is pending for the correct scope.
+  Future<bool?> hasChat(
+    String owner,
+    String peer, {
+    bool archived = false,
+  }) async {
     final db = await _database;
+    final archivedFlag = archived ? 1 : 0;
     final rows = await db.query(
       'chat_previews',
       columns: ['id'],
-      where: 'owner = ? AND id = ?',
-      whereArgs: [owner, peer],
+      where: 'owner = ? AND id = ? AND archived = ?',
+      whereArgs: [owner, peer, archivedFlag],
       limit: 1,
     );
     if (rows.isNotEmpty) return true;
-    return await previewsSynced(owner) ? false : null;
+    return await previewsSynced(owner, archived: archived) ? false : null;
   }
 
+  // Returns scope key corresponding to archive status.
   String _previewScope(bool archived) => archived ? 'archived' : 'previews';
 
+  // Formats row values for chat preview table insertion with safe null checks.
   Map<String, Object?> _previewRow(
     String owner,
     int position,
@@ -369,6 +411,7 @@ class LocalDb {
     };
   }
 
+  // Fetches a profile by user ID.
   Future<Map<String, dynamic>?> profile(String id) async {
     final db = await _database;
     final rows = await db.query(
@@ -381,6 +424,7 @@ class LocalDb {
     return Map<String, dynamic>.from(rows.first);
   }
 
+  // Saves or updates user profile details.
   Future<void> saveProfile(String id, Map<String, dynamic> row) async {
     final db = await _database;
     await db.insert('profiles', <String, Object?>{
@@ -389,12 +433,14 @@ class LocalDb {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  // Retrieves saved local accounts ordered by last login time.
   Future<List<Map<String, dynamic>>> savedAccounts() async {
     final db = await _database;
     final rows = await db.query('saved_accounts', orderBy: 'last_login DESC');
     return rows.map((r) => Map<String, dynamic>.from(r)).toList();
   }
 
+  // Saves account info and sets current timestamp as last login.
   Future<void> saveAccount(Map<String, dynamic> account) async {
     final db = await _database;
     await db.insert('saved_accounts', <String, Object?>{
@@ -409,6 +455,7 @@ class LocalDb {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  // Updates last login timestamp for an existing saved account.
   Future<void> touchAccount(String id) async {
     final db = await _database;
     await db.update(
@@ -419,11 +466,13 @@ class LocalDb {
     );
   }
 
+  // Removes a saved account record by ID.
   Future<void> removeAccount(String id) async {
     final db = await _database;
     await db.delete('saved_accounts', where: 'id = ?', whereArgs: [id]);
   }
 
+  // Fetches recent search entries up to the configured limit.
   Future<List<Map<String, dynamic>>> searchHistory(String owner) async {
     final db = await _database;
     final rows = await db.query(
@@ -437,16 +486,21 @@ class LocalDb {
     return rows.map((r) => Map<String, dynamic>.from(r)).toList();
   }
 
+  // Adds or updates user entry in search history with current timestamp and safe ID handling.
   Future<void> addSearch(String owner, Map<String, dynamic> user) async {
     final db = await _database;
+    final userId = user['id']?.toString();
+    if (userId == null) return;
+
     await db.insert('search_history', <String, Object?>{
       'owner': owner,
-      'id': user['id'].toString(),
+      'id': userId,
       for (final c in _userColumns) c: user[c]?.toString(),
       'searched_at': DateTime.now().millisecondsSinceEpoch,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  // Deletes a single user record from search history.
   Future<void> removeSearch(String owner, String id) async {
     final db = await _database;
     await db.delete(
@@ -456,11 +510,13 @@ class LocalDb {
     );
   }
 
+  // Clears all search history entries for an owner.
   Future<void> clearSearches(String owner) async {
     final db = await _database;
     await db.delete('search_history', where: 'owner = ?', whereArgs: [owner]);
   }
 
+  // Deletes all user-specific data upon sign out or account wipe.
   Future<void> wipe(String owner) async {
     final db = await _database;
     final batch = db.batch();
