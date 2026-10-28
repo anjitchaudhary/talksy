@@ -299,7 +299,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               SizedBox(height: 10),
               Text(
-                '2. Direct Google Sign-In:\nAlternatively, use Google Sign-In for seamless access. If you ever forget your password, you can sign in directly through Google.',
+                '2. Direct Google Sign-In:\nAlternatively, use Google Sign-In for seamless access. If you ever forget your password, you can sign in directly through Google Account.',
                 textAlign: TextAlign.justify,
                 style: TextStyle(fontSize: 13, height: 1.35),
               ),
